@@ -21,7 +21,12 @@ core.
   after the module's `ApplyFunc` accepted a change and never on a refused one;
   its status values cover only its own keys. A section that would make the
   manifest invalid (a reused key or action name) is refused.
-- Requires `logos-golang-protocol` v0.6.0 (build operation types in tests).
+- **Action conditions.** Before it runs an action for the first time, the
+  `Server` checks the action's `available_when` (protocol v0.6.0) against its
+  current status and effective values, and refuses with `action_unavailable`
+  and the reason. A retried invocation still gets its first answer.
+- Requires `logos-golang-protocol` v0.6.0 (build operation types in tests,
+  action conditions).
 
 ## v0.1.2
 

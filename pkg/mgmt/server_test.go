@@ -700,3 +700,89 @@ func TestExtendRefusesInvalidSections(t *testing.T) {
 		})
 	}
 }
+
+// conditionalServer has drain and resume available by the draining status,
+// and trace only at log level debug.
+func conditionalServer(t *testing.T, draining *atomic.Bool, runs *atomic.Int32) *Server {
+	t.Helper()
+	level := prop("log_level", protocol.FieldEnum, protocol.ApplyLive, "info")
+	level.Options = []protocol.EnumOption{{Value: "info"}, {Value: "debug"}}
+	s, err := New(protocol.ManagementManifest{
+		SchemaVersion: protocol.ManagementSchemaV1,
+		Properties:    []protocol.PropertySpec{level},
+		Actions: []protocol.ActionSpec{
+			{Name: "drain", Risk: protocol.RiskHigh, AvailableWhen: []protocol.ActionCondition{
+				{Status: "draining", Op: protocol.OpEq, Value: false, Message: "Already draining"}}},
+			{Name: "resume", Risk: protocol.RiskLow, AvailableWhen: []protocol.ActionCondition{
+				{Status: "draining", Op: protocol.OpEq, Value: true}}},
+			{Name: "trace", Risk: protocol.RiskLow, AvailableWhen: []protocol.ActionCondition{
+				{Property: "log_level", Op: protocol.OpEq, Value: "debug", Message: "Set the log level to debug first"}}},
+		},
+		Status: []protocol.StatusSpec{{Key: "draining", Type: protocol.FieldBool, Label: "Draining"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	set := func(on bool) ActionFunc {
+		return func(context.Context, map[string]any, *protocol.Actor) (any, error) {
+			runs.Add(1)
+			draining.Store(on)
+			return map[string]any{"draining": on}, nil
+		}
+	}
+	s.Action("drain", set(true))
+	s.Action("resume", set(false))
+	s.Action("trace", func(context.Context, map[string]any, *protocol.Actor) (any, error) { runs.Add(1); return nil, nil })
+	s.Status(func() map[string]any { return map[string]any{"draining": draining.Load()} })
+	return s
+}
+
+func TestActionConditions(t *testing.T) {
+	var draining atomic.Bool
+	var runs atomic.Int32
+	s := conditionalServer(t, &draining, &runs)
+
+	// Resume is pointless while not draining.
+	rep := invoke(t, s, "r1", "resume", nil)
+	wantError(t, rep, protocol.CodeActionUnavailable)
+	if rep.Error.Message != "Requires Draining: Yes" || runs.Load() != 0 {
+		t.Fatalf("refusal %+v after %d runs", rep.Error, runs.Load())
+	}
+
+	var out protocol.ActionInvokeReply
+	decodeOK(t, invoke(t, s, "d1", "drain", nil), &out)
+	rep = invoke(t, s, "d2", "drain", nil)
+	wantError(t, rep, protocol.CodeActionUnavailable)
+	if rep.Error.Message != "Already draining" || runs.Load() != 1 {
+		t.Fatalf("refusal %+v after %d runs", rep.Error, runs.Load())
+	}
+	// A retry of an invocation that ran gets its result, not a refusal.
+	decodeOK(t, invoke(t, s, "d1", "drain", nil), &out)
+	// And a refused one stays refused.
+	wantError(t, invoke(t, s, "r1", "resume", nil), protocol.CodeActionUnavailable)
+
+	decodeOK(t, invoke(t, s, "r2", "resume", nil), &out)
+	if draining.Load() || runs.Load() != 2 {
+		t.Fatalf("draining %v after %d runs", draining.Load(), runs.Load())
+	}
+
+	// A condition on a property follows its effective value.
+	wantError(t, invoke(t, s, "t1", "trace", nil), protocol.CodeActionUnavailable)
+	s.ApplyConfig(context.Background(), protocol.ManagementConfig{Revision: 1, Values: map[string]any{"log_level": "debug"}})
+	decodeOK(t, invoke(t, s, "t2", "trace", nil), &out)
+	if runs.Load() != 3 {
+		t.Fatalf("%d runs", runs.Load())
+	}
+}
+
+func TestActionConditionsOnAnUnreportedValue(t *testing.T) {
+	var draining atomic.Bool
+	var runs atomic.Int32
+	s := conditionalServer(t, &draining, &runs)
+	s.Status(func() map[string]any { return nil })
+	var out protocol.ActionInvokeReply
+	decodeOK(t, invoke(t, s, "r1", "resume", nil), &out)
+	if runs.Load() != 1 {
+		t.Fatalf("%d runs", runs.Load())
+	}
+}

@@ -510,10 +510,14 @@ func (s *Server) invoke(ctx context.Context, req protocol.Envelope, r protocol.A
 
 	inv, first := s.claim(r.Action, r.InvocationID)
 	if first {
-		// The action outlives the delivery's context: a consumer closed by a
-		// reconnect must not cancel it, or core's retry of the same
-		// invocation would get a false failure. Its own timeout bounds it.
-		inv.result, inv.err = runAction(context.WithoutCancel(ctx), spec, fn, params, r.Actor)
+		if ok, reason := s.available(spec); !ok {
+			inv.err = &protocol.EnvelopeError{Code: protocol.CodeActionUnavailable, Message: reason}
+		} else {
+			// The action outlives the delivery's context: a consumer closed
+			// by a reconnect must not cancel it, or core's retry of the same
+			// invocation would get a false failure. Its own timeout bounds it.
+			inv.result, inv.err = runAction(context.WithoutCancel(ctx), spec, fn, params, r.Actor)
+		}
 		close(inv.done)
 	} else {
 		select {
@@ -526,6 +530,19 @@ func (s *Server) invoke(ctx context.Context, req protocol.Envelope, r protocol.A
 		return s.errorReply(req, inv.err.Code, inv.err.Message)
 	}
 	return s.reply(req, protocol.ActionInvokeReply{InvocationID: r.InvocationID, Result: inv.result})
+}
+
+// available checks spec's conditions (available_when) against the current
+// status and effective values. It is a check, not a lock: two invocations
+// may both pass it before either runs.
+func (s *Server) available(spec protocol.ActionSpec) (bool, string) {
+	if len(spec.AvailableWhen) == 0 {
+		return true, ""
+	}
+	s.mu.RLock()
+	m, values := s.manifest, cloneMap(s.effective)
+	s.mu.RUnlock()
+	return protocol.ActionAvailable(m, spec, s.StatusSnapshot(), values)
 }
 
 // claim returns the remembered invocation of action with id, or registers a
