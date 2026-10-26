@@ -62,6 +62,11 @@ type Identity struct {
 	Version     string // module build/version
 	RPCQueue    string // queue core uses to call back into this module
 	Description string // optional free text, surfaced on the admin Modules page
+	// Icon is an optional SVG icon core shows for the module, checked with
+	// protocol.ValidateIcon; without one, core shows its module type's
+	// default. Where the module keeps it (an embedded file, a constant,
+	// something generated) is up to the module.
+	Icon string
 }
 
 func (id Identity) validate() error {
@@ -74,6 +79,11 @@ func (id Identity) validate() error {
 		return coreerrors.New(coreerrors.CodeInvalidInput, "instance is required")
 	case id.RPCQueue == "":
 		return coreerrors.New(coreerrors.CodeInvalidInput, "rpc_queue is required")
+	}
+	if id.Icon != "" {
+		if err := protocol.ValidateIcon(id.Icon); err != nil {
+			return coreerrors.New(coreerrors.CodeInvalidInput, "icon: "+err.Error())
+		}
 	}
 	return nil
 }
@@ -177,7 +187,7 @@ func WithRegisterField(key string, value any) Option {
 // lifecycle contract; WithRegisterField cannot set them.
 var ReservedRegisterFields = []string{
 	"module_type", "module_name", "instance", "version", "rpc_queue",
-	"description", "management", "applied_revision",
+	"description", "icon", "management", "applied_revision",
 }
 
 // WithDeregisterTimeout overrides how long Run waits for the shutdown
@@ -218,6 +228,7 @@ type registerRequest struct {
 	Version     string `json:"version"`
 	RPCQueue    string `json:"rpc_queue"`
 	Description string `json:"description,omitempty"`
+	Icon        string `json:"icon,omitempty"`
 
 	Management      *protocol.ManagementManifest `json:"management,omitempty"`
 	AppliedRevision *int64                       `json:"applied_revision,omitempty"`
@@ -294,6 +305,7 @@ func (c *Client) Register(ctx context.Context) (BootstrapConfig, error) {
 		Version:     c.id.Version,
 		RPCQueue:    c.id.RPCQueue,
 		Description: c.id.Description,
+		Icon:        c.id.Icon,
 		extensions:  c.extensions,
 	}
 	if c.mgmt != nil {

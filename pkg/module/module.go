@@ -84,6 +84,12 @@ func Run(ctx context.Context, cfg Config) error {
 	if cfg.Identity.ModuleType == "" {
 		return errors.New("module: Identity.ModuleType is required")
 	}
+	// An icon that cannot pass would fail every registration; say so now.
+	if cfg.Identity.Icon != "" {
+		if err := protocol.ValidateIcon(cfg.Identity.Icon); err != nil {
+			return fmt.Errorf("module: Identity.Icon: %w", err)
+		}
+	}
 	if cfg.Identity.RPCQueue == "" {
 		cfg.Identity.RPCQueue = RPCQueue(cfg.Identity.ModuleType, cfg.Identity.Instance)
 	}

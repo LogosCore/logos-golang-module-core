@@ -25,8 +25,12 @@ core.
   `Server` checks the action's `available_when` (protocol v0.6.0) against its
   current status and effective values, and refuses with `action_unavailable`
   and the reason. A retried invocation still gets its first answer.
+- **Module icons.** `lifecycle.Identity.Icon` is an optional SVG icon sent in
+  `module.register` (`icon`, now a reserved register field). `module.Run`
+  refuses one that fails `protocol.ValidateIcon`; without one, core shows the
+  module type's default.
 - Requires `logos-golang-protocol` v0.6.0 (build operation types in tests,
-  action conditions).
+  action conditions, icons).
 
 ## v0.1.2
 

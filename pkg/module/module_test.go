@@ -3,6 +3,7 @@ package module
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -37,6 +38,17 @@ func TestRun_RefusesManagementHandler(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("Run took a handler for a management operation")
+	}
+}
+
+func TestRun_RefusesAnInvalidIcon(t *testing.T) {
+	err := Run(context.Background(), Config{
+		AMQPURL: "amqp://x/",
+		Identity: lifecycle.Identity{ModuleType: "channel", ModuleName: "http", Instance: "test",
+			Icon: `<svg viewBox="0 0 24 24"/>`}, // no SVG namespace
+	})
+	if err == nil || !strings.Contains(err.Error(), "Identity.Icon") {
+		t.Fatalf("Run with an invalid icon: %v", err)
 	}
 }
 
