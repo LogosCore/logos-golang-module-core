@@ -1,9 +1,12 @@
 package lifecycle
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -725,4 +728,74 @@ func TestRegisterSendsTheIcon(t *testing.T) {
 	if _, err := NewClient(fp, testIdentity(), WithRegisterField("icon", testIcon)).Register(context.Background()); err == nil {
 		t.Error("icon taken as an extension field")
 	}
+}
+
+func TestRunLogsABlock(t *testing.T) {
+	var mu sync.Mutex
+	registers := 0
+	refused := make(chan struct{}, 4)
+	fp := &fakePublisher{}
+	fp.replyFn = func(req protocol.Envelope) (protocol.ReplyEnvelope, error) {
+		src := protocol.Source{Service: "core", Instance: "core-1"}
+		switch req.Type {
+		case TypeRegister:
+			mu.Lock()
+			registers++
+			n := registers
+			mu.Unlock()
+			if n >= 2 { // blocked while running
+				refused <- struct{}{}
+				return protocol.NewErrorReply(req, src, protocol.CodeInstanceBlocked, "an operator blocked this instance"), nil
+			}
+			return okReply(t, req, registerReply{Instance: "http-1", Registered: true, HeartbeatIntervalSecs: 1}), nil
+		case TypeHeartbeat:
+			return protocol.NewErrorReply(req, src, protocol.CodeUnknownInstance, "no active registration"), nil
+		case TypeDeregister:
+			return protocol.NewErrorReply(req, src, protocol.CodeUnknownInstance, "no active registration"), nil
+		}
+		return protocol.ReplyEnvelope{}, fmt.Errorf("unexpected %q", req.Type)
+	}
+
+	var logs syncBuffer
+	c := NewClient(fp, testIdentity(), WithLogger(slog.New(slog.NewTextHandler(&logs, nil))))
+	tickCh := make(chan time.Time)
+	c.newTicker = func(time.Duration) (<-chan time.Time, func()) { return tickCh, func() {} }
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- c.Run(ctx) }()
+
+	for range 2 { // still blocked at the next heartbeat: asked again
+		tickCh <- time.Time{}
+		select {
+		case <-refused:
+		case <-time.After(2 * time.Second):
+			t.Fatal("client did not ask to register again")
+		}
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if n := strings.Count(logs.String(), "core has blocked this instance"); n != 2 {
+		t.Fatalf("logged the block %d times:\n%s", n, logs.String())
+	}
+}
+
+// syncBuffer is a bytes.Buffer safe for a logger and a test reading it.
+type syncBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
 }

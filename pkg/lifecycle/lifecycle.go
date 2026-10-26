@@ -15,6 +15,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"time"
 
 	coreerrors "github.com/logoscore/logos-golang-module-core/pkg/errors"
@@ -134,6 +135,7 @@ type Client struct {
 	extensionKeys []string
 
 	deregisterTimeout time.Duration
+	logger            *slog.Logger
 	// newTicker is injectable so the Run loop is deterministically testable.
 	newTicker func(time.Duration) (<-chan time.Time, func())
 }
@@ -188,6 +190,19 @@ func WithRegisterField(key string, value any) Option {
 var ReservedRegisterFields = []string{
 	"module_type", "module_name", "instance", "version", "rpc_queue",
 	"description", "icon", "management", "applied_revision",
+}
+
+// WithLogger sets the logger Run reports with (failed re-registers, a block).
+// Defaults to slog.Default().
+func WithLogger(l *slog.Logger) Option {
+	return func(c *Client) { c.logger = l }
+}
+
+func (c *Client) log() *slog.Logger {
+	if c.logger != nil {
+		return c.logger
+	}
+	return slog.Default()
 }
 
 // WithDeregisterTimeout overrides how long Run waits for the shutdown
@@ -404,6 +419,15 @@ func (c *Client) Run(ctx context.Context) error {
 	reregister := func() {
 		boot, err := c.Register(ctx)
 		if err != nil {
+			// Asked again at the next heartbeat, which core answers with
+			// unknown_instance until the instance is registered.
+			if coreerrors.Code(err) == protocol.CodeInstanceBlocked {
+				c.log().Warn("control plane: core has blocked this instance; asking again at the next heartbeat",
+					"instance", c.id.Instance)
+			} else {
+				c.log().Warn("control plane: re-register failed; retrying at the next heartbeat",
+					"instance", c.id.Instance, "err", err)
+			}
 			return
 		}
 		c.reportApplied(ctx, boot)

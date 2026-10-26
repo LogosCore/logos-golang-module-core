@@ -16,6 +16,7 @@ import (
 	"log/slog"
 	"time"
 
+	coreerrors "github.com/logoscore/logos-golang-module-core/pkg/errors"
 	"github.com/logoscore/logos-golang-module-core/pkg/lifecycle"
 	"github.com/logoscore/logos-golang-module-core/pkg/logstream"
 	"github.com/logoscore/logos-golang-module-core/pkg/mgmt"
@@ -125,7 +126,9 @@ func Run(ctx context.Context, cfg Config) error {
 		if time.Since(started) > maxBackoff {
 			backoff = minBackoff
 		}
-		logger().Warn("control plane: session failed; retrying", "err", err, "retry_in", backoff.String())
+		var msg string
+		backoff, msg = retryAfter(err, backoff)
+		logger().Warn(msg, "err", err, "retry_in", backoff.String())
 		select {
 		case <-ctx.Done():
 			return nil
@@ -133,6 +136,16 @@ func Run(ctx context.Context, cfg Config) error {
 		}
 		backoff = min(backoff*2, maxBackoff)
 	}
+}
+
+// retryAfter is how long to wait after a failed session, and what to log. A
+// blocked instance stays blocked until an operator lifts the block, so it asks
+// again only every maxBackoff.
+func retryAfter(err error, backoff time.Duration) (time.Duration, string) {
+	if coreerrors.Code(err) == protocol.CodeInstanceBlocked {
+		return maxBackoff, "control plane: core has blocked this instance; asking again later"
+	}
+	return backoff, "control plane: session failed; retrying"
 }
 
 // runSession runs one broker connection's worth of lifecycle. It returns nil
@@ -153,7 +166,7 @@ func runSession(ctx context.Context, cfg Config, router *mgmt.Router, logger fun
 
 	// Core may call the rpc_queue as soon as it acks the register, so the
 	// consumer must be up first. It is closed after the deregister.
-	opts := cfg.Options
+	opts := append([]lifecycle.Option{lifecycle.WithLogger(logger())}, cfg.Options...)
 	var rpcDone <-chan struct{}
 	if cfg.Management != nil || len(cfg.Handlers) > 0 {
 		consumer, err := mgmt.NewAMQPConsumer(conn, mgmt.RPCExchange(id.ModuleType), id.RPCQueue, id.Instance, router)

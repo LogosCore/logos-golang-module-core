@@ -3,10 +3,13 @@ package module
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
+	coreerrors "github.com/logoscore/logos-golang-module-core/pkg/errors"
 	"github.com/logoscore/logos-golang-module-core/pkg/lifecycle"
 	"github.com/logoscore/logos-golang-module-core/pkg/mgmt"
 	"github.com/logoscore/logos-golang-protocol/protocol"
@@ -78,5 +81,15 @@ func TestRun_StopsOnCancelWhileBrokerUnreachable(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Run did not return after cancel")
+	}
+}
+
+func TestRetryAfter(t *testing.T) {
+	blocked := fmt.Errorf("register: %w", coreerrors.New(protocol.CodeInstanceBlocked, "an operator blocked this instance"))
+	if wait, msg := retryAfter(blocked, minBackoff); wait != maxBackoff || !strings.Contains(msg, "blocked") {
+		t.Errorf("blocked: %s %q, want %s", wait, msg, maxBackoff)
+	}
+	if wait, msg := retryAfter(errors.New("connection refused"), 4*time.Second); wait != 4*time.Second || strings.Contains(msg, "blocked") {
+		t.Errorf("other error: %s %q", wait, msg)
 	}
 }

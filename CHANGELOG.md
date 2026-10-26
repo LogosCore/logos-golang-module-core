@@ -29,8 +29,13 @@ core.
   `module.register` (`icon`, now a reserved register field). `module.Run`
   refuses one that fails `protocol.ValidateIcon`; without one, core shows the
   module type's default.
+- **Blocked instances.** When core refuses a registration with
+  `instance_blocked` (an operator blocked the instance), `module.Run` says so
+  and asks again every 30 s; a running instance that gets blocked logs it at
+  each heartbeat, when it asks to register again. `lifecycle.WithLogger` sets
+  the client's logger (module.Run passes its own).
 - Requires `logos-golang-protocol` v0.6.0 (build operation types in tests,
-  action conditions, icons).
+  action conditions, icons, `instance_blocked`).
 
 ## v0.1.2
 
