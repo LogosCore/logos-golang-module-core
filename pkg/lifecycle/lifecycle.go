@@ -459,11 +459,7 @@ func (c *Client) call(ctx context.Context, typ string, payload, out any) error {
 		return err
 	}
 	if reply.Status == protocol.StatusError {
-		code, msg := protocol.CodeInternalError, "lifecycle rpc failed"
-		if reply.Error != nil {
-			code, msg = reply.Error.Code, reply.Error.Message
-		}
-		return coreerrors.New(code, msg)
+		return replyError(reply, "lifecycle rpc failed")
 	}
 	if out != nil {
 		if err := json.Unmarshal(reply.Payload, out); err != nil {
@@ -473,9 +469,13 @@ func (c *Client) call(ctx context.Context, typ string, payload, out any) error {
 	return nil
 }
 
+func (c *Client) newRequest(typ string, payload any) (protocol.Envelope, error) {
+	return newRequest(c.source, typ, payload)
+}
+
 // newRequest builds a control-plane request envelope. correlation_id equals
 // message_id on an originating request, per the envelope contract.
-func (c *Client) newRequest(typ string, payload any) (protocol.Envelope, error) {
+func newRequest(source protocol.Source, typ string, payload any) (protocol.Envelope, error) {
 	raw, err := json.Marshal(payload)
 	if err != nil {
 		return protocol.Envelope{}, err
@@ -487,9 +487,18 @@ func (c *Client) newRequest(typ string, payload any) (protocol.Envelope, error) 
 		Type:          typ,
 		Version:       protocol.EnvelopeVersionV1,
 		Timestamp:     protocol.NowTimestamp(),
-		Source:        c.source,
+		Source:        source,
 		Payload:       raw,
 	}, nil
+}
+
+// replyError maps an error reply to a typed error carrying core's code.
+func replyError(reply protocol.ReplyEnvelope, fallback string) error {
+	code, msg := protocol.CodeInternalError, fallback
+	if reply.Error != nil {
+		code, msg = reply.Error.Code, reply.Error.Message
+	}
+	return coreerrors.New(code, msg)
 }
 
 func bootstrapFrom(rep registerReply) BootstrapConfig {

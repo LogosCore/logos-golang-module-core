@@ -7,15 +7,15 @@ live log streaming and logging.
 Type-specific SDKs build on it:
 
 - [`logos-golang-channel-core`](https://github.com/logoscore/logos-golang-channel-core): channels.
-- A factory SDK will follow.
+- [`logos-golang-factory-core`](https://github.com/logoscore/logos-golang-factory-core): factories.
 
 ## Packages
 
 | Package | What it does |
 |---|---|
-| `pkg/module` | `Run(ctx, Config)` runs one instance's whole control-plane session. It connects to RabbitMQ and serves management (and logs) on the rpc_queue. Then it registers, heartbeats, deregisters on shutdown, and reconnects with backoff. |
-| `pkg/lifecycle` | `module.register` / `module.heartbeat` / `module.deregister` client. `WithManagement`, `WithStatus`, `WithMetrics`, and `WithRegisterField` for fields a module type declares at registration. |
-| `pkg/mgmt` | Management `Server` built from a `protocol.ManagementManifest`: `mgmt.config.apply`, `mgmt.action.invoke`, `mgmt.state.get`, logs. `AMQPConsumer` serves it on the module's rpc_queue. |
+| `pkg/module` | `Run(ctx, Config)` runs one instance's whole control-plane session. It connects to RabbitMQ and serves the rpc_queue: management (and logs), and the operations a module type adds (`Config.Handlers`). Then it registers, heartbeats, deregisters on shutdown, and reconnects with backoff. `Config.Core` lets the module call core itself. |
+| `pkg/lifecycle` | `module.register` / `module.heartbeat` / `module.deregister` client. `WithManagement`, `WithStatus`, `WithMetrics`, and `WithRegisterField` for fields a module type declares at registration. `CoreClient` calls core over the current session, for a module type's own operations toward core. |
+| `pkg/mgmt` | Management `Server` built from a `protocol.ManagementManifest`: `mgmt.config.apply`, `mgmt.action.invoke`, `mgmt.state.get`, logs. `Router` adds a module type's operations next to it, and `AMQPConsumer` serves the `Router` on the module's rpc_queue. |
 | `pkg/logstream` | Live log tail for core: ring buffer, leased streams, batches to `logos.module.logs`. |
 | `pkg/logging` | The module's slog logger (`json` / `text`), teed into a `logstream.Hub`. |
 | `pkg/errors` | Typed error (`Code`, `Message`, wrapped cause) shared by all module SDKs. |

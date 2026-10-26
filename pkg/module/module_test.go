@@ -2,10 +2,13 @@ package module
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 
 	"github.com/logoscore/logos-golang-module-core/pkg/lifecycle"
+	"github.com/logoscore/logos-golang-module-core/pkg/mgmt"
+	"github.com/logoscore/logos-golang-protocol/protocol"
 )
 
 func TestRPCQueue(t *testing.T) {
@@ -21,6 +24,19 @@ func TestRun_RequiresModuleType(t *testing.T) {
 	err := Run(context.Background(), Config{AMQPURL: "amqp://x/", Identity: lifecycle.Identity{ModuleName: "http", Instance: "test"}})
 	if err == nil {
 		t.Fatal("Run without ModuleType returned nil")
+	}
+}
+
+func TestRun_RefusesManagementHandler(t *testing.T) {
+	err := Run(context.Background(), Config{
+		AMQPURL:  "amqp://x/",
+		Identity: lifecycle.Identity{ModuleType: "factory", ModuleName: "bob", Instance: "test"},
+		Handlers: map[string]mgmt.HandlerFunc{protocol.TypeMgmtStateGet: func(context.Context, json.RawMessage) (any, error) {
+			return nil, nil
+		}},
+	})
+	if err == nil {
+		t.Fatal("Run took a handler for a management operation")
 	}
 }
 

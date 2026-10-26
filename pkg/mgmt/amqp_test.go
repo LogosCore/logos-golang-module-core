@@ -116,7 +116,7 @@ func waitFor(t *testing.T, cond func() bool) {
 func TestAMQPConsumerDeclaresAndServes(t *testing.T) {
 	fch := &fakeChannel{deliveries: make(chan amqp.Delivery, 4)}
 	s := newTestServer(t)
-	c, err := startConsumer(fch, RPCExchange("channel"), "logos.channel.rpc.http-1", "http-1", s)
+	c, err := startConsumer(fch, RPCExchange("channel"), "logos.channel.rpc.http-1", "http-1", routerFor(t, s))
 	if err != nil {
 		t.Fatalf("start: %v", err)
 	}
@@ -181,7 +181,7 @@ func TestAMQPConsumerDeclaresAndServes(t *testing.T) {
 
 func TestAMQPConsumerDoneOnDeliveryClose(t *testing.T) {
 	fch := &fakeChannel{deliveries: make(chan amqp.Delivery)}
-	c, err := startConsumer(fch, "x", "q", "i", newTestServer(t))
+	c, err := startConsumer(fch, "x", "q", "i", routerFor(t, newTestServer(t)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -196,7 +196,18 @@ func TestAMQPConsumerDoneOnDeliveryClose(t *testing.T) {
 
 func TestAMQPConsumerDeclareError(t *testing.T) {
 	fch := &fakeChannel{declareErr: errors.New("RESOURCE_LOCKED")}
-	if _, err := startConsumer(fch, "x", "q", "i", newTestServer(t)); err == nil {
+	if _, err := startConsumer(fch, "x", "q", "i", routerFor(t, newTestServer(t))); err == nil {
 		t.Fatal("expected declare error")
 	}
+}
+
+// routerFor serves s alone, as module.Run does for a managed module that adds
+// no operations of its own.
+func routerFor(t *testing.T, s *Server) *Router {
+	t.Helper()
+	r, err := NewRouter(s.source, s, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r
 }

@@ -34,12 +34,12 @@ type consumeChannel interface {
 	Close() error
 }
 
-// AMQPConsumer serves a Server on a module's rpc_queue. Requests are envelope
+// AMQPConsumer serves a Router on a module's rpc_queue. Requests are envelope
 // JSON bodies; each reply is published to the request's reply_to over the
 // default exchange, echoing correlation_id. Every delivery is acked.
 type AMQPConsumer struct {
 	ch     consumeChannel
-	srv    *Server
+	router *Router
 	tag    string
 	ctx    context.Context // handler context, cancelled by Close
 	cancel context.CancelFunc
@@ -56,12 +56,12 @@ type AMQPConsumer struct {
 // to exchange (normally RPCExchange(module type)) with routing key instance,
 // and starts consuming. It returns once consuming has begun, so a module can
 // register right after. Release it with Close.
-func NewAMQPConsumer(conn *amqp.Connection, exchange, queue, instance string, s *Server) (*AMQPConsumer, error) {
+func NewAMQPConsumer(conn *amqp.Connection, exchange, queue, instance string, r *Router) (*AMQPConsumer, error) {
 	ch, err := conn.Channel()
 	if err != nil {
 		return nil, fmt.Errorf("open amqp channel: %w", err)
 	}
-	c, err := startConsumer(ch, exchange, queue, instance, s)
+	c, err := startConsumer(ch, exchange, queue, instance, r)
 	if err != nil {
 		_ = ch.Close()
 		return nil, err
@@ -69,7 +69,7 @@ func NewAMQPConsumer(conn *amqp.Connection, exchange, queue, instance string, s 
 	return c, nil
 }
 
-func startConsumer(ch consumeChannel, exchange, queue, instance string, s *Server) (*AMQPConsumer, error) {
+func startConsumer(ch consumeChannel, exchange, queue, instance string, r *Router) (*AMQPConsumer, error) {
 	// Durable direct exchange; idempotent if core already declared it.
 	if err := ch.ExchangeDeclare(exchange, "direct", true, false, false, false, nil); err != nil {
 		return nil, fmt.Errorf("declare exchange %q: %w", exchange, err)
@@ -91,7 +91,7 @@ func startConsumer(ch consumeChannel, exchange, queue, instance string, s *Serve
 		return nil, fmt.Errorf("consume %q: %w", queue, err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	c := &AMQPConsumer{ch: ch, srv: s, tag: tag, ctx: ctx, cancel: cancel, done: make(chan struct{})}
+	c := &AMQPConsumer{ch: ch, router: r, tag: tag, ctx: ctx, cancel: cancel, done: make(chan struct{})}
 	go c.loop(deliveries)
 	return c, nil
 }
@@ -140,12 +140,12 @@ func (c *AMQPConsumer) handle(ctx context.Context, d amqp.Delivery) {
 	var reply protocol.ReplyEnvelope
 	if err := json.Unmarshal(d.Body, &req); err != nil {
 		req = protocol.Envelope{CorrelationID: d.CorrelationId, Type: d.Type, Version: protocol.EnvelopeVersionV1}
-		reply = c.srv.errorReply(req, protocol.CodeValidationFailed, "invalid envelope: "+err.Error())
+		reply = c.router.errorReply(req, protocol.CodeValidationFailed, "invalid envelope: "+err.Error())
 	} else {
 		if req.CorrelationID == "" {
 			req.CorrelationID = d.CorrelationId
 		}
-		reply = c.srv.Handle(ctx, req)
+		reply = c.router.Handle(ctx, req)
 	}
 
 	c.pubMu.Lock()

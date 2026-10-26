@@ -6,7 +6,9 @@
 // Server is transport-agnostic: Handle dispatches any control-plane request
 // envelope, and ApplyConfig is also fed the effective config core returns in
 // the module.register reply (see lifecycle.WithManagement). AMQPConsumer serves
-// a Server on the module's RabbitMQ rpc_queue.
+// the module's RabbitMQ rpc_queue through a Router, which hands management
+// requests to the Server and the operations a module type adds (a factory's
+// builds) to their own handlers.
 //
 // Values handed to callbacks are normalized by field type: int and bytes are
 // int64, number is float64, string_list is []string, string_map is

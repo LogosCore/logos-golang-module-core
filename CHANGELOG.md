@@ -1,5 +1,22 @@
 # Changelog
 
+## v0.2.0 (unreleased)
+
+What a factory SDK needs: serving a module type's own operations, and calling
+core.
+
+- **`mgmt.Router`** serves the rpc_queue: a module type's operations
+  (`HandlerFunc`, by envelope type) go to their handlers, everything else to
+  the management `Server`, if any. A handler error made with
+  `coreerrors.New(code, message)` replies with that code (e.g. `busy`).
+  `mgmt.NewAMQPConsumer` now takes a `*Router` instead of a `*Server`.
+- **`module.Config.Handlers`** adds operations to the rpc_queue, which is now
+  served whenever there is management or a handler.
+- **`lifecycle.CoreClient`** calls core over the current session (`Call`), for
+  operations a module type sends core itself; `module.Config.Core` attaches it
+  to every session. Between sessions calls fail with `ErrNotConnected`.
+- Requires `logos-golang-protocol` v0.6.0 (build operation types in tests).
+
 ## v0.1.2
 
 - Requires `logos-golang-protocol` v0.5.0 (`protocol.ServiceFactory`).

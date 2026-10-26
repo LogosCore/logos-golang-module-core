@@ -1,7 +1,8 @@
 // Package module runs a module's whole control-plane session with core: it
-// connects to RabbitMQ, serves the management server (if any) on the module's
-// rpc_queue, registers, heartbeats, and deregisters on shutdown — reconnecting
-// with backoff whenever the broker connection or the initial register fails.
+// connects to RabbitMQ, serves the module's rpc_queue (management, if any, and
+// the operations its module type adds), registers, heartbeats, and deregisters
+// on shutdown — reconnecting with backoff whenever the broker connection or the
+// initial register fails.
 //
 // It is plumbing only. What a module can be managed on (properties, actions,
 // status values) is declared by the module through its mgmt.Server; this
@@ -49,6 +50,13 @@ type Config struct {
 	// logs live: Run serves it on the rpc_queue (declaring the logs
 	// capability) and attaches a publisher for each broker session.
 	Logs *logstream.Hub
+	// Handlers serve the operations a module type adds to the rpc_queue, by
+	// envelope type (a factory's factory.build), next to management. With
+	// handlers the rpc_queue is served even when Management is nil.
+	Handlers map[string]mgmt.HandlerFunc
+	// Core, when set, is attached to every session, so the module can call
+	// core itself, e.g. to report a build's result.
+	Core *lifecycle.CoreClient
 	// Options are extra lifecycle options (e.g. WithStatus, WithMetrics, or
 	// WithRegisterField for what a module type declares at registration).
 	Options []lifecycle.Option
@@ -91,14 +99,19 @@ func Run(ctx context.Context, cfg Config) error {
 		}
 		cfg.Management.ServeLogs(cfg.Logs)
 	}
+	source := protocol.Source{Service: cfg.Identity.ModuleType, Instance: cfg.Identity.Instance}
 	if cfg.Management != nil {
-		cfg.Management.DefaultSource(protocol.Source{Service: cfg.Identity.ModuleType, Instance: cfg.Identity.Instance})
+		cfg.Management.DefaultSource(source)
+	}
+	router, err := mgmt.NewRouter(source, cfg.Management, cfg.Handlers)
+	if err != nil {
+		return fmt.Errorf("module: %w", err)
 	}
 
 	backoff := minBackoff
 	for {
 		started := time.Now()
-		err := runSession(ctx, cfg, logger)
+		err := runSession(ctx, cfg, router, logger)
 		if ctx.Err() != nil {
 			return nil
 		}
@@ -118,7 +131,7 @@ func Run(ctx context.Context, cfg Config) error {
 
 // runSession runs one broker connection's worth of lifecycle. It returns nil
 // only on ctx cancellation (after deregistering).
-func runSession(ctx context.Context, cfg Config, logger func() *slog.Logger) error {
+func runSession(ctx context.Context, cfg Config, router *mgmt.Router, logger func() *slog.Logger) error {
 	id := cfg.Identity
 	conn, err := amqp.Dial(cfg.AMQPURL)
 	if err != nil {
@@ -135,14 +148,16 @@ func runSession(ctx context.Context, cfg Config, logger func() *slog.Logger) err
 	// Core may call the rpc_queue as soon as it acks the register, so the
 	// consumer must be up first. It is closed after the deregister.
 	opts := cfg.Options
-	var mgmtDone <-chan struct{}
-	if cfg.Management != nil {
-		consumer, err := mgmt.NewAMQPConsumer(conn, mgmt.RPCExchange(id.ModuleType), id.RPCQueue, id.Instance, cfg.Management)
+	var rpcDone <-chan struct{}
+	if cfg.Management != nil || len(cfg.Handlers) > 0 {
+		consumer, err := mgmt.NewAMQPConsumer(conn, mgmt.RPCExchange(id.ModuleType), id.RPCQueue, id.Instance, router)
 		if err != nil {
-			return fmt.Errorf("serve management on %q: %w", id.RPCQueue, err)
+			return fmt.Errorf("serve rpc_queue %q: %w", id.RPCQueue, err)
 		}
 		defer consumer.Close()
-		mgmtDone = consumer.Done()
+		rpcDone = consumer.Done()
+	}
+	if cfg.Management != nil {
 		if cfg.Logs != nil {
 			lp, err := logstream.NewAMQPPublisher(conn)
 			if err != nil {
@@ -156,6 +171,12 @@ func runSession(ctx context.Context, cfg Config, logger func() *slog.Logger) err
 		}
 		opts = append([]lifecycle.Option{lifecycle.WithManagement(cfg.Management)}, opts...)
 	}
+	if cfg.Core != nil {
+		// Detached before the publisher closes: calls between sessions fail
+		// fast instead of hanging on a dead channel.
+		cfg.Core.Attach(pub, protocol.Source{Service: id.ModuleType, Instance: id.Instance})
+		defer cfg.Core.Detach()
+	}
 
 	sessionCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -166,8 +187,8 @@ func runSession(ctx context.Context, cfg Config, logger func() *slog.Logger) err
 		case e := <-closed:
 			connLost <- fmt.Errorf("RabbitMQ connection closed: %v", e)
 			cancel()
-		case <-mgmtDone: // nil without management: never ready
-			connLost <- fmt.Errorf("management consumer on %q stopped", id.RPCQueue)
+		case <-rpcDone: // nil without a consumer: never ready
+			connLost <- fmt.Errorf("rpc_queue consumer on %q stopped", id.RPCQueue)
 			cancel()
 		case <-sessionCtx.Done():
 		}
