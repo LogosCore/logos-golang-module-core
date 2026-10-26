@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.1.2
+
+- Requires `logos-golang-protocol` v0.5.0 (`protocol.ServiceFactory`).
+
 ## v0.1.1
 
 - Docs and tests: the minion-builder module type is called `factory`
