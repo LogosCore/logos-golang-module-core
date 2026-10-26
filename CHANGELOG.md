@@ -15,6 +15,12 @@ core.
 - **`lifecycle.CoreClient`** calls core over the current session (`Call`), for
   operations a module type sends core itself; `module.Config.Core` attaches it
   to every session. Between sessions calls fail with `ErrNotConnected`.
+- **`mgmt.Server.Extend(Section)`** adds a section a module type's SDK serves
+  itself to a module's management: its properties, actions (with their
+  handlers) and status values join the module's manifest; its `Apply` runs
+  after the module's `ApplyFunc` accepted a change and never on a refused one;
+  its status values cover only its own keys. A section that would make the
+  manifest invalid (a reused key or action name) is refused.
 - Requires `logos-golang-protocol` v0.6.0 (build operation types in tests).
 
 ## v0.1.2

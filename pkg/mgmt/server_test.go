@@ -552,3 +552,151 @@ func TestDefaultSource(t *testing.T) {
 		t.Errorf("DefaultSource overrode WithSource: %+v", s.source)
 	}
 }
+
+// buildsSection is a section the way a type SDK adds one.
+func buildsSection(applied *[]map[string]any, max *int64) Section {
+	limit := prop("max_builds", protocol.FieldInt, protocol.ApplyLive, int64(2))
+	limit.Min, limit.Max = 1, 8
+	return Section{
+		Properties: []protocol.PropertySpec{limit},
+		Actions:    []protocol.ActionSpec{{Name: "pause", Risk: protocol.RiskLow}},
+		Status:     []protocol.StatusSpec{{Key: "builds_running", Type: protocol.FieldInt}},
+		Apply: func(_ context.Context, live map[string]any) {
+			*applied = append(*applied, live)
+			*max = live["max_builds"].(int64)
+		},
+		Handlers: map[string]ActionFunc{
+			"pause": func(context.Context, map[string]any, *protocol.Actor) (any, error) { return "paused", nil },
+		},
+		Values: func() map[string]any { return map[string]any{"builds_running": 1, "requests_total": 99} },
+	}
+}
+
+func TestExtend(t *testing.T) {
+	s := newTestServer(t)
+	var own []string
+	s.OnApply(func(_ context.Context, live map[string]any) error {
+		own = append(own, live["log_level"].(string))
+		if live["log_level"] == "debug" {
+			return errors.New("no debug today")
+		}
+		return nil
+	})
+	s.Status(func() map[string]any { return map[string]any{"requests_total": 3, "builds_running": 7} })
+	var applied []map[string]any
+	var max int64
+	if err := s.Extend(buildsSection(&applied, &max)); err != nil {
+		t.Fatalf("Extend: %v", err)
+	}
+
+	m := s.Manifest()
+	if len(m.Properties) != 5 || m.Properties[4].Key != "max_builds" || len(m.Actions) != 4 || len(m.Status) != 3 {
+		t.Fatalf("manifest = %+v", m)
+	}
+	if st := s.State(); st.Values["max_builds"] != int64(2) {
+		t.Errorf("max_builds before any apply = %v, want the default", st.Values["max_builds"])
+	}
+
+	// The section applies after the module, with every live value.
+	rep := s.ApplyConfig(context.Background(), protocol.ManagementConfig{Revision: 1, Values: map[string]any{"max_builds": 5}})
+	if len(rep.Rejected) != 0 || len(own) != 1 || len(applied) != 1 || max != 5 || applied[0]["log_level"] != "info" {
+		t.Fatalf("reply = %+v, own = %v, section = %v", rep, own, applied)
+	}
+	// A change the module refuses never reaches the section.
+	rep = s.ApplyConfig(context.Background(), protocol.ManagementConfig{Revision: 2, Values: map[string]any{"max_builds": 6, "log_level": "debug"}})
+	if rep.Rejected["max_builds"] == "" || len(applied) != 1 || max != 5 || s.State().Values["max_builds"] != int64(5) {
+		t.Fatalf("reply = %+v, section = %v, max = %d", rep, applied, max)
+	}
+	// Out of the section's bounds: refused like any property.
+	rep = s.ApplyConfig(context.Background(), protocol.ManagementConfig{Revision: 3, Values: map[string]any{"max_builds": 9}})
+	if rep.Rejected["max_builds"] == "" || len(applied) != 2 || max != 5 {
+		t.Fatalf("reply = %+v, max = %d (an invalid value keeps the previous one)", rep, max)
+	}
+
+	var out protocol.ActionInvokeReply
+	decodeOK(t, s.Handle(context.Background(), request(t, protocol.TypeMgmtActionInvoke,
+		protocol.ActionInvokeRequest{InvocationID: "i1", Action: "pause"})), &out)
+	if out.Result != "paused" {
+		t.Errorf("pause result = %v", out.Result)
+	}
+
+	// The section's status values join the module's, each side keeping to
+	// its own keys.
+	if got := s.StatusSnapshot(); got["requests_total"] != 3 || got["builds_running"] != 1 || len(got) != 2 {
+		t.Errorf("status = %v", got)
+	}
+}
+
+func TestExtendWithoutModuleCallbacks(t *testing.T) {
+	s, err := New(protocol.ManagementManifest{SchemaVersion: protocol.ManagementSchemaV1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.StatusSnapshot() != nil {
+		t.Fatal("status without any callback")
+	}
+	var applied []map[string]any
+	var max int64
+	if err := s.Extend(buildsSection(&applied, &max)); err != nil {
+		t.Fatalf("Extend: %v", err)
+	}
+	s.ApplyConfig(context.Background(), protocol.ManagementConfig{Revision: 1, Values: map[string]any{"max_builds": 3}})
+	if max != 3 {
+		t.Errorf("max = %d, want 3", max)
+	}
+	if got := s.StatusSnapshot(); len(got) != 1 || got["builds_running"] != 1 {
+		t.Errorf("status = %v", got)
+	}
+
+	// A key the section does not report stays unreported.
+	t2, err := New(protocol.ManagementManifest{SchemaVersion: protocol.ManagementSchemaV1,
+		Status: []protocol.StatusSpec{{Key: "requests_total", Type: protocol.FieldInt}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t2.Status(func() map[string]any { return map[string]any{"requests_total": 1, "builds_running": 4} })
+	sec := buildsSection(&applied, &max)
+	sec.Values = func() map[string]any { return nil }
+	if err := t2.Extend(sec); err != nil {
+		t.Fatal(err)
+	}
+	if got := t2.StatusSnapshot(); len(got) != 1 || got["requests_total"] != 1 {
+		t.Errorf("status = %v", got)
+	}
+}
+
+func TestExtendRefusesInvalidSections(t *testing.T) {
+	var applied []map[string]any
+	var max int64
+	for name, change := range map[string]func(*Section){
+		"property clash": func(sec *Section) { sec.Properties[0].Key = "log_level" },
+		"action clash": func(sec *Section) {
+			sec.Actions[0].Name = "drain"
+			sec.Handlers = map[string]ActionFunc{"drain": sec.Handlers["pause"]}
+		},
+		"status clash":         func(sec *Section) { sec.Status[0].Key = "draining" },
+		"invalid spec":         func(sec *Section) { sec.Properties[0].Apply = "never" },
+		"action no handler":    func(sec *Section) { sec.Handlers = nil },
+		"handler no action":    func(sec *Section) { sec.Handlers["stop"] = sec.Handlers["pause"] },
+		"too many status keys": func(sec *Section) { sec.Status = make([]protocol.StatusSpec, protocol.MaxManifestStatus) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := newTestServer(t)
+			before := s.Manifest()
+			sec := buildsSection(&applied, &max)
+			change(&sec)
+			if err := s.Extend(sec); err == nil {
+				t.Fatal("Extend accepted an invalid section")
+			}
+			if after := s.Manifest(); len(after.Properties) != len(before.Properties) ||
+				len(after.Actions) != len(before.Actions) || len(after.Status) != len(before.Status) {
+				t.Errorf("manifest changed: %+v", after)
+			}
+			if _, ok := s.State().Values["max_builds"]; ok {
+				t.Error("a refused section's property took effect")
+			}
+			wantError(t, s.Handle(context.Background(), request(t, protocol.TypeMgmtActionInvoke,
+				protocol.ActionInvokeRequest{InvocationID: "i1", Action: "pause"})), protocol.CodeNotFound)
+		})
+	}
+}

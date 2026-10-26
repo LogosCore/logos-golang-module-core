@@ -8,7 +8,8 @@
 // the module.register reply (see lifecycle.WithManagement). AMQPConsumer serves
 // the module's RabbitMQ rpc_queue through a Router, which hands management
 // requests to the Server and the operations a module type adds (a factory's
-// builds) to their own handlers.
+// builds) to their own handlers. A module type's SDK can also add a section of
+// its own to the module's management (Extend).
 //
 // Values handed to callbacks are normalized by field type: int and bytes are
 // int64, number is float64, string_list is []string, string_map is
@@ -20,6 +21,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"reflect"
 	"slices"
 	"sync"
@@ -91,10 +93,19 @@ type Server struct {
 	actions         map[string]ActionFunc
 	status          StatusFunc
 	logs            LogStreamer
+	// sectionApply and sectionStatus serve the sections added by Extend.
+	sectionApply  []func(ctx context.Context, live map[string]any)
+	sectionStatus []sectionStatus
 
 	dedupeMu sync.Mutex
 	dedupe   map[string]*invocation
 	order    []string // dedupe keys, oldest first
+}
+
+// sectionStatus is a section's status values and the keys they are for.
+type sectionStatus struct {
+	keys   []string
+	values StatusFunc
 }
 
 // invocation is a remembered (possibly still running) action invocation.
@@ -165,12 +176,12 @@ func (s *Server) OnApply(fn ApplyFunc) {
 // Action registers the handler for a declared action. It panics on an action
 // the manifest does not declare, which is a programming error.
 func (s *Server) Action(name string, fn ActionFunc) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if _, ok := s.actSpecs[name]; !ok {
 		panic(fmt.Sprintf("mgmt: action %q is not declared in the manifest", name))
 	}
-	s.mu.Lock()
 	s.actions[name] = fn
-	s.mu.Unlock()
 }
 
 // Status sets the callback supplying status values.
@@ -178,6 +189,81 @@ func (s *Server) Status(fn StatusFunc) {
 	s.mu.Lock()
 	s.status = fn
 	s.mu.Unlock()
+}
+
+// Section is a part of a module's management that the SDK of its module type
+// serves itself, next to what the module declares: a factory's builds, for
+// instance. See Extend.
+type Section struct {
+	Properties []protocol.PropertySpec
+	Actions    []protocol.ActionSpec
+	Status     []protocol.StatusSpec
+	// Apply receives the full live values once they take effect: after the
+	// module's ApplyFunc accepted them, or when there is none. It cannot
+	// refuse them; they have been checked against their specs.
+	Apply func(ctx context.Context, live map[string]any)
+	// Handlers run the section's actions, by name: one for each, and no other.
+	Handlers map[string]ActionFunc
+	// Values supplies the section's status values. Only its own keys are
+	// taken, and only from it: never from the module's StatusFunc.
+	Values StatusFunc
+}
+
+// Extend adds sec to the manifest and serves it: its properties start at
+// their defaults, its actions run on its handlers, its status values join
+// the module's, and its Apply follows the module's ApplyFunc on every
+// config apply. It refuses a section that would make the manifest invalid,
+// such as one reusing a key or action name the manifest already has, and
+// leaves the server as it was. Call it before the server is served, like
+// ServeLogs.
+func (s *Server) Extend(sec Section) error {
+	s.applyMu.Lock()
+	defer s.applyMu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	m := s.manifest
+	m.Properties = append(slices.Clone(m.Properties), sec.Properties...)
+	m.Actions = append(slices.Clone(m.Actions), sec.Actions...)
+	m.Status = append(slices.Clone(m.Status), sec.Status...)
+	if err := protocol.ValidateManifest(m); err != nil {
+		return fmt.Errorf("extend management: %w", err)
+	}
+	for _, a := range sec.Actions {
+		if sec.Handlers[a.Name] == nil {
+			return fmt.Errorf("extend management: action %q has no handler", a.Name)
+		}
+	}
+	for name := range sec.Handlers {
+		if !slices.ContainsFunc(sec.Actions, func(a protocol.ActionSpec) bool { return a.Name == name }) {
+			return fmt.Errorf("extend management: handler %q is not one of the section's actions", name)
+		}
+	}
+
+	s.manifest = m
+	for _, p := range sec.Properties {
+		s.props[p.Key] = p
+		v := normalize(p.FieldSpec, p.Default)
+		s.effective[p.Key] = v
+		if p.Apply == protocol.ApplyRestart {
+			s.startup[p.Key] = v
+		}
+	}
+	for _, a := range sec.Actions {
+		s.actSpecs[a.Name] = a
+		s.actions[a.Name] = sec.Handlers[a.Name]
+	}
+	if sec.Apply != nil {
+		s.sectionApply = append(s.sectionApply, sec.Apply)
+	}
+	if sec.Values != nil {
+		keys := make([]string, len(sec.Status))
+		for i, st := range sec.Status {
+			keys[i] = st.Key
+		}
+		s.sectionStatus = append(s.sectionStatus, sectionStatus{keys: keys, values: sec.Values})
+	}
+	return nil
 }
 
 // Manifest returns the declared manifest.
@@ -195,17 +281,31 @@ func (s *Server) AppliedRevision() int64 {
 }
 
 // StatusSnapshot returns the current status values, restricted to the keys the
-// manifest declares. It returns nil without a status callback.
+// manifest declares. It returns nil without a status callback, the module's or
+// a section's.
 func (s *Server) StatusSnapshot() map[string]any {
 	s.mu.RLock()
-	fn := s.status
+	fn, sections, specs := s.status, s.sectionStatus, s.manifest.Status
 	s.mu.RUnlock()
-	if fn == nil {
+	if fn == nil && len(sections) == 0 {
 		return nil
 	}
-	all := fn()
-	out := make(map[string]any, len(s.manifest.Status))
-	for _, st := range s.manifest.Status {
+	all := map[string]any{}
+	if fn != nil {
+		maps.Copy(all, fn())
+	}
+	for _, sec := range sections {
+		values := sec.values()
+		for _, k := range sec.keys {
+			if v, ok := values[k]; ok {
+				all[k] = v
+			} else {
+				delete(all, k)
+			}
+		}
+	}
+	out := make(map[string]any, len(specs))
+	for _, st := range specs {
 		if v, ok := all[st.Key]; ok {
 			out[st.Key] = v
 		}
@@ -226,6 +326,7 @@ func (s *Server) ApplyConfig(ctx context.Context, cfg protocol.ManagementConfig)
 
 	s.mu.RLock()
 	current, prev, fn := s.applied, cloneMap(s.effective), s.onApply
+	props, sections := s.manifest.Properties, s.sectionApply
 	s.mu.RUnlock()
 	if cfg.Revision < current {
 		return s.currentReply()
@@ -234,7 +335,7 @@ func (s *Server) ApplyConfig(ctx context.Context, cfg protocol.ManagementConfig)
 	next := cloneMap(prev)
 	rejected := map[string]string{}
 	var restart []string
-	for _, p := range s.manifest.Properties {
+	for _, p := range props {
 		v, ok := cfg.Values[p.Key]
 		if !ok {
 			v = p.Default
@@ -266,9 +367,14 @@ func (s *Server) ApplyConfig(ctx context.Context, cfg protocol.ManagementConfig)
 			next = prev
 		}
 	}
+	if !applyFailed {
+		for _, apply := range sections {
+			apply(ctx, cloneMap(next))
+		}
+	}
 
 	if !s.booted && !applyFailed {
-		for _, p := range s.manifest.Properties {
+		for _, p := range props {
 			if p.Apply == protocol.ApplyRestart {
 				s.startup[p.Key] = next[p.Key]
 			}
@@ -390,8 +496,8 @@ func (s *Server) invoke(ctx context.Context, req protocol.Envelope, r protocol.A
 	if r.InvocationID == "" {
 		return s.errorReply(req, protocol.CodeValidationFailed, "invocation_id is required")
 	}
-	spec, ok := s.actSpecs[r.Action]
 	s.mu.RLock()
+	spec, ok := s.actSpecs[r.Action]
 	fn := s.actions[r.Action]
 	s.mu.RUnlock()
 	if !ok || fn == nil {
