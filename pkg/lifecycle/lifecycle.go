@@ -56,7 +56,7 @@ const (
 // "http"); Instance is the unique id of one deployed instance and is the key
 // core addresses for heartbeat, deregister, and management RPC.
 type Identity struct {
-	ModuleType  string // "channel" | "minion-factory"
+	ModuleType  string // "channel" | "factory"
 	ModuleName  string // hardcoded module kind, e.g. "http"
 	Instance    string // unique deployed-instance id, self-assigned
 	Version     string // module build/version

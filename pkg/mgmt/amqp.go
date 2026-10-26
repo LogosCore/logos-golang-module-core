@@ -11,7 +11,7 @@ import (
 )
 
 // RPCExchange is the direct exchange for core → module RPC of moduleType:
-// logos.<module_type>.rpc (logos.channel.rpc, logos.minion-factory.rpc). A
+// logos.<module_type>.rpc (logos.channel.rpc, logos.factory.rpc). A
 // module's rpc_queue is bound to it with routing key = instance; core itself
 // publishes to the default exchange with routing key = rpc_queue. See the docs
 // repo: contracts/amqp-conventions.md.

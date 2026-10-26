@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Go SDK (`github.com/logoscore/logos-golang-module-core`) for the control plane shared by every Logos module type: registration and liveness, management, live log streaming and logging. Type-specific SDKs build on it: `logos-golang-channel-core` (channels) and, later, a minion-factory SDK. Nothing here is specific to one module type; type-specific behaviour belongs in those SDKs.
+Go SDK (`github.com/logoscore/logos-golang-module-core`) for the control plane shared by every Logos module type: registration and liveness, management, live log streaming and logging. Type-specific SDKs build on it: `logos-golang-channel-core` (channels) and, later, a factory SDK. Nothing here is specific to one module type; type-specific behaviour belongs in those SDKs.
 
 Depends on `github.com/logoscore/logos-golang-protocol` for envelopes and the management manifest types.
 

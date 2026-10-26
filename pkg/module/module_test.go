@@ -12,7 +12,7 @@ func TestRPCQueue(t *testing.T) {
 	if got := RPCQueue("channel", "http-1"); got != "logos.channel.rpc.http-1" {
 		t.Errorf("RPCQueue = %q", got)
 	}
-	if got := RPCQueue("minion-factory", "mf-1"); got != "logos.minion-factory.rpc.mf-1" {
+	if got := RPCQueue("factory", "bob-1"); got != "logos.factory.rpc.bob-1" {
 		t.Errorf("RPCQueue = %q", got)
 	}
 }

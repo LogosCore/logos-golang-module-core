@@ -1,13 +1,13 @@
 # logos-golang-module-core
 
 Go SDK for the control plane every Logos module shares with core, whatever its
-type (channel, minion factory, ...): registration and liveness, management,
+type (channel, factory, ...): registration and liveness, management,
 live log streaming and logging.
 
 Type-specific SDKs build on it:
 
 - [`logos-golang-channel-core`](https://github.com/logoscore/logos-golang-channel-core): channels.
-- A minion-factory SDK will follow.
+- A factory SDK will follow.
 
 ## Packages
 
@@ -26,16 +26,16 @@ Core calls a module back on the `rpc_queue` it sent at registration. By
 convention that queue is `logos.<module_type>.rpc.<instance>`, bound to the
 direct exchange `logos.<module_type>.rpc` with routing key = instance
 (`module.RPCQueue`, `mgmt.RPCExchange`). Examples are
-`logos.channel.rpc.http-1` and `logos.minion-factory.rpc.mf-1`.
+`logos.channel.rpc.http-1` and `logos.factory.rpc.bob-1`.
 
 ## Usage
 
 ```go
 srv, _ := mgmt.New(manifest)
-hub := logstream.New("mf-1")
+hub := logstream.New("bob-1")
 err := module.Run(ctx, module.Config{
 	AMQPURL:    amqpURL,
-	Identity:   lifecycle.Identity{ModuleType: "minion-factory", ModuleName: "go", Instance: "mf-1", Version: version},
+	Identity:   lifecycle.Identity{ModuleType: "factory", ModuleName: "bob", Instance: "bob-1", Version: version},
 	Management: srv,
 	Logs:       hub,
 	Options:    []lifecycle.Option{lifecycle.WithRegisterField("targets", targets)},

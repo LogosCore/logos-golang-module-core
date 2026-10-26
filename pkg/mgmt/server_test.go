@@ -542,12 +542,12 @@ func TestDefaultSource(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s.DefaultSource(protocol.Source{Service: "minion-factory", Instance: "mf-1"})
-	if s.source.Service != "minion-factory" || s.source.Instance != "mf-1" {
+	s.DefaultSource(protocol.Source{Service: "factory", Instance: "bob-1"})
+	if s.source.Service != "factory" || s.source.Instance != "bob-1" {
 		t.Errorf("source = %+v", s.source)
 	}
 	s, _ = New(testManifest(), WithSource(protocol.Source{Service: "channel", Instance: "http-1"}))
-	s.DefaultSource(protocol.Source{Service: "minion-factory", Instance: "mf-1"})
+	s.DefaultSource(protocol.Source{Service: "factory", Instance: "bob-1"})
 	if s.source.Instance != "http-1" {
 		t.Errorf("DefaultSource overrode WithSource: %+v", s.source)
 	}

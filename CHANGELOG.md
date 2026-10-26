@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.1.1
+
+- Docs and tests: the minion-builder module type is called `factory`
+  (`logos.factory.rpc.<instance>`), no longer `minion-factory`. No code
+  change: routing follows whatever module type a module registers with.
+
 ## v0.1.0
 
 Extracted from `logos-golang-channel-core` v2.2.0, where these packages were
