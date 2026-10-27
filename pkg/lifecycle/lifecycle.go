@@ -68,6 +68,13 @@ type Identity struct {
 	// default. Where the module keeps it (an embedded file, a constant,
 	// something generated) is up to the module.
 	Icon string
+	// IconLight is an optional second icon, drawn instead of Icon on light
+	// themes. The UI paints an icon in its text colour: light on dark themes,
+	// dark on light ones. A drawing whose shape is the lit parts of a shaded
+	// picture reads as a negative the other way round, so it needs one drawn
+	// for light themes, with the shadows and lines as the shape. Checked like
+	// Icon, and only with one.
+	IconLight string
 }
 
 func (id Identity) validate() error {
@@ -84,6 +91,14 @@ func (id Identity) validate() error {
 	if id.Icon != "" {
 		if err := protocol.ValidateIcon(id.Icon); err != nil {
 			return coreerrors.New(coreerrors.CodeInvalidInput, "icon: "+err.Error())
+		}
+	}
+	if id.IconLight != "" {
+		if id.Icon == "" {
+			return coreerrors.New(coreerrors.CodeInvalidInput, "icon_light needs an icon")
+		}
+		if err := protocol.ValidateIcon(id.IconLight); err != nil {
+			return coreerrors.New(coreerrors.CodeInvalidInput, "icon_light: "+err.Error())
 		}
 	}
 	return nil
@@ -189,7 +204,7 @@ func WithRegisterField(key string, value any) Option {
 // lifecycle contract; WithRegisterField cannot set them.
 var ReservedRegisterFields = []string{
 	"module_type", "module_name", "instance", "version", "rpc_queue",
-	"description", "icon", "management", "applied_revision",
+	"description", "icon", "icon_light", "management", "applied_revision",
 }
 
 // WithLogger sets the logger Run reports with (failed re-registers, a block).
@@ -244,6 +259,7 @@ type registerRequest struct {
 	RPCQueue    string `json:"rpc_queue"`
 	Description string `json:"description,omitempty"`
 	Icon        string `json:"icon,omitempty"`
+	IconLight   string `json:"icon_light,omitempty"`
 
 	Management      *protocol.ManagementManifest `json:"management,omitempty"`
 	AppliedRevision *int64                       `json:"applied_revision,omitempty"`
@@ -321,6 +337,7 @@ func (c *Client) Register(ctx context.Context) (BootstrapConfig, error) {
 		RPCQueue:    c.id.RPCQueue,
 		Description: c.id.Description,
 		Icon:        c.id.Icon,
+		IconLight:   c.id.IconLight,
 		extensions:  c.extensions,
 	}
 	if c.mgmt != nil {

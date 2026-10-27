@@ -91,6 +91,14 @@ func Run(ctx context.Context, cfg Config) error {
 			return fmt.Errorf("module: Identity.Icon: %w", err)
 		}
 	}
+	if cfg.Identity.IconLight != "" {
+		if cfg.Identity.Icon == "" {
+			return errors.New("module: Identity.IconLight needs an Identity.Icon")
+		}
+		if err := protocol.ValidateIcon(cfg.Identity.IconLight); err != nil {
+			return fmt.Errorf("module: Identity.IconLight: %w", err)
+		}
+	}
 	if cfg.Identity.RPCQueue == "" {
 		cfg.Identity.RPCQueue = RPCQueue(cfg.Identity.ModuleType, cfg.Identity.Instance)
 	}

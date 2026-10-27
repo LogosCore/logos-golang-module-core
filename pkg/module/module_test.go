@@ -55,6 +55,19 @@ func TestRun_RefusesAnInvalidIcon(t *testing.T) {
 	}
 }
 
+func TestRun_RefusesAnInvalidLightIcon(t *testing.T) {
+	const icon = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/></svg>`
+	for name, id := range map[string]lifecycle.Identity{
+		"invalid":         {ModuleType: "channel", ModuleName: "http", Instance: "test", Icon: icon, IconLight: `<svg viewBox="0 0 24 24"/>`},
+		"without an icon": {ModuleType: "channel", ModuleName: "http", Instance: "test", IconLight: icon},
+	} {
+		err := Run(context.Background(), Config{AMQPURL: "amqp://x/", Identity: id})
+		if err == nil || !strings.Contains(err.Error(), "Identity.IconLight") {
+			t.Errorf("Run with a light icon %s: %v", name, err)
+		}
+	}
+}
+
 func TestRun_RequiresAMQPURL(t *testing.T) {
 	if err := Run(context.Background(), Config{}); err == nil {
 		t.Fatal("Run with empty AMQPURL returned nil")

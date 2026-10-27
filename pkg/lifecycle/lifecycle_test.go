@@ -413,6 +413,10 @@ func TestIdentityValidate(t *testing.T) {
 		"missing instance":    func(id *Identity) { id.Instance = "" },
 		"missing rpc_queue":   func(id *Identity) { id.RPCQueue = "" },
 		"invalid icon":        func(id *Identity) { id.Icon = `<svg><script>alert(1)</script></svg>` },
+		"invalid icon_light": func(id *Identity) {
+			id.Icon, id.IconLight = testIcon, `<svg><script>alert(1)</script></svg>`
+		},
+		"icon_light without icon": func(id *Identity) { id.IconLight = testIcon },
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -698,13 +702,15 @@ func TestRunHeartbeatsAppliedRevisionRightAfterRegister(t *testing.T) {
 
 const testIcon = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/></svg>`
 
+const testIconLight = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="none" stroke="black"/></svg>`
+
 func TestRegisterSendsTheIcon(t *testing.T) {
-	for _, icon := range []string{testIcon, ""} {
+	for _, icons := range [][2]string{{testIcon, testIconLight}, {testIcon, ""}, {"", ""}} {
 		fp := &fakePublisher{replyFn: func(req protocol.Envelope) (protocol.ReplyEnvelope, error) {
 			return okReply(t, req, registerReply{Instance: "http-1", Registered: true}), nil
 		}}
 		id := testIdentity()
-		id.Icon = icon
+		id.Icon, id.IconLight = icons[0], icons[1]
 		if _, err := NewClient(fp, id).Register(context.Background()); err != nil {
 			t.Fatal(err)
 		}
@@ -712,21 +718,25 @@ func TestRegisterSendsTheIcon(t *testing.T) {
 		if err := json.Unmarshal(fp.calls()[0].Payload, &raw); err != nil {
 			t.Fatal(err)
 		}
-		got, sent := raw["icon"]
-		if icon == "" && sent {
-			t.Errorf("an empty icon was sent: %v", got)
-		}
-		if icon != "" && got != icon {
-			t.Errorf("icon = %v, want the identity's", got)
+		for i, key := range []string{"icon", "icon_light"} {
+			got, sent := raw[key]
+			if icons[i] == "" && sent {
+				t.Errorf("an empty %s was sent: %v", key, got)
+			}
+			if icons[i] != "" && got != icons[i] {
+				t.Errorf("%s = %v, want the identity's", key, got)
+			}
 		}
 	}
 
-	// A type SDK cannot set it as an extension.
-	fp := &fakePublisher{replyFn: func(req protocol.Envelope) (protocol.ReplyEnvelope, error) {
-		return okReply(t, req, registerReply{Instance: "http-1", Registered: true}), nil
-	}}
-	if _, err := NewClient(fp, testIdentity(), WithRegisterField("icon", testIcon)).Register(context.Background()); err == nil {
-		t.Error("icon taken as an extension field")
+	// A type SDK cannot set them as extensions.
+	for _, key := range []string{"icon", "icon_light"} {
+		fp := &fakePublisher{replyFn: func(req protocol.Envelope) (protocol.ReplyEnvelope, error) {
+			return okReply(t, req, registerReply{Instance: "http-1", Registered: true}), nil
+		}}
+		if _, err := NewClient(fp, testIdentity(), WithRegisterField(key, testIcon)).Register(context.Background()); err == nil {
+			t.Errorf("%s taken as an extension field", key)
+		}
 	}
 }
 
