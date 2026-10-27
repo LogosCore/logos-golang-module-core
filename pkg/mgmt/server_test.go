@@ -61,7 +61,7 @@ func request(t *testing.T, typ string, payload any) protocol.Envelope {
 	if err != nil {
 		t.Fatal(err)
 	}
-	id := protocol.NewULID()
+	id := protocol.NewID()
 	return protocol.Envelope{
 		MessageID: id, CorrelationID: id, Type: typ, Version: protocol.EnvelopeVersionV1,
 		Source: protocol.Source{Service: "core", Instance: "core-1"}, Payload: raw,

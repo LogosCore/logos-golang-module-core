@@ -516,7 +516,7 @@ func newRequest(source protocol.Source, typ string, payload any) (protocol.Envel
 	if err != nil {
 		return protocol.Envelope{}, err
 	}
-	id := protocol.NewULID()
+	id := protocol.NewID()
 	return protocol.Envelope{
 		MessageID:     id,
 		CorrelationID: id,

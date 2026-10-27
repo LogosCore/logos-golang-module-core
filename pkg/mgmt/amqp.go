@@ -85,7 +85,7 @@ func startConsumer(ch consumeChannel, exchange, queue, instance string, r *Route
 	}
 	// Stopped by an explicit Cancel in Close: cancelling via the consume
 	// context races amqp091's own cancel against Channel.Close and can hang.
-	tag := "logos-mgmt-" + protocol.NewULID()
+	tag := "logos-mgmt-" + protocol.NewID()
 	deliveries, err := ch.ConsumeWithContext(context.Background(), queue, tag, false, true, false, false, nil)
 	if err != nil {
 		return nil, fmt.Errorf("consume %q: %w", queue, err)
