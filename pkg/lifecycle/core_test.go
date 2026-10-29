@@ -40,13 +40,13 @@ func TestCoreClientCall(t *testing.T) {
 	src := protocol.Source{Service: "factory", Instance: "bob-1"}
 	pub := &recordingPublisher{reply: protocol.ReplyEnvelope{
 		Status:  protocol.StatusOK,
-		Payload: json.RawMessage(`{"minion_id":"b-1","recorded":true}`),
+		Payload: json.RawMessage(`{"build_id":"b-1","recorded":true}`),
 	}}
 	c := NewCoreClient()
 	c.Attach(pub, src)
 
 	var out protocol.BuildResultReply
-	err := c.Call(context.Background(), protocol.TypeFactoryBuildResult, protocol.BuildResult{MinionID: "b-1", Status: protocol.BuildSucceeded}, &out)
+	err := c.Call(context.Background(), protocol.TypeFactoryBuildResult, protocol.BuildResult{BuildID: "b-1", Status: protocol.BuildSucceeded}, &out)
 	if err != nil || !out.Recorded {
 		t.Fatalf("Call = %v, reply %+v", err, out)
 	}
@@ -56,7 +56,7 @@ func TestCoreClientCall(t *testing.T) {
 		t.Fatalf("request envelope: %+v", req)
 	}
 	var sent protocol.BuildResult
-	if err := json.Unmarshal(req.Payload, &sent); err != nil || sent.MinionID != "b-1" {
+	if err := json.Unmarshal(req.Payload, &sent); err != nil || sent.BuildID != "b-1" {
 		t.Fatalf("payload %s: %v", req.Payload, err)
 	}
 	if !pub.hadDeadline {
