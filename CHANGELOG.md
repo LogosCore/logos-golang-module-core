@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.2.1
+
+- Requires `logos-golang-protocol` v0.7.0, where the minion id is renamed to
+  the build id (`BuildID`, `build_id`). Only tests used it.
+
 ## v0.2.0
 
 What a factory SDK needs: serving a module type's own operations, and calling
