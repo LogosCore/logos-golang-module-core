@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.2.0 (unreleased)
+## v0.2.0
 
 What a factory SDK needs: serving a module type's own operations, and calling
 core.
