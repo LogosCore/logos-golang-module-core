@@ -72,6 +72,13 @@ func (s *stream) run(pub Publisher, backlog []protocol.LogRecord, flush time.Dur
 
 	var buf []protocol.LogRecord
 	send := func(end bool, reason string) {
+		// At most MaxLogBatchRecords a batch: what an end drains comes on top
+		// of what was waiting, up to streamBuffer more. Full batches first,
+		// the last with the end.
+		for len(buf) > protocol.MaxLogBatchRecords {
+			publish(protocol.LogBatch{Records: buf[:protocol.MaxLogBatchRecords]})
+			buf = buf[protocol.MaxLogBatchRecords:]
+		}
 		dropped := s.dropped.Swap(0)
 		if len(buf) == 0 && dropped == 0 && !end {
 			return
