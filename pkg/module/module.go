@@ -164,13 +164,15 @@ func runSession(ctx context.Context, cfg Config, router *mgmt.Router, logger fun
 	if err != nil {
 		return fmt.Errorf("connect to RabbitMQ: %w", err)
 	}
-	defer conn.Close()
+	// The session's teardown: a close that fails changes nothing, the next
+	// session dials afresh.
+	defer func() { _ = conn.Close() }()
 
 	pub, err := lifecycle.NewAMQPPublisher(conn)
 	if err != nil {
 		return fmt.Errorf("open lifecycle publisher: %w", err)
 	}
-	defer pub.Close()
+	defer func() { _ = pub.Close() }()
 
 	// Core may call the rpc_queue as soon as it acks the register, so the
 	// consumer must be up first. It is closed after the deregister.
@@ -181,7 +183,7 @@ func runSession(ctx context.Context, cfg Config, router *mgmt.Router, logger fun
 		if err != nil {
 			return fmt.Errorf("serve rpc_queue %q: %w", id.RPCQueue, err)
 		}
-		defer consumer.Close()
+		defer func() { _ = consumer.Close() }()
 		rpcDone = consumer.Done()
 	}
 	if cfg.Management != nil {
@@ -190,7 +192,7 @@ func runSession(ctx context.Context, cfg Config, router *mgmt.Router, logger fun
 			if err != nil {
 				return fmt.Errorf("open log publisher: %w", err)
 			}
-			defer lp.Close()
+			defer func() { _ = lp.Close() }()
 			cfg.Logs.Attach(lp)
 			// Streams die with the session; core's lease renewal restarts
 			// them on the next one.

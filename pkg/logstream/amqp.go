@@ -26,7 +26,7 @@ func NewAMQPPublisher(conn *amqp.Connection) (*AMQPPublisher, error) {
 	}
 	// Durable direct exchange; idempotent if core already declared it.
 	if err := ch.ExchangeDeclare(protocol.LogsExchange, "direct", true, false, false, false, nil); err != nil {
-		ch.Close()
+		_ = ch.Close() // the declare's error is the one to report
 		return nil, fmt.Errorf("declare exchange %q: %w", protocol.LogsExchange, err)
 	}
 	return &AMQPPublisher{ch: ch}, nil

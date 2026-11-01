@@ -185,7 +185,9 @@ func TestAMQPConsumerDoneOnDeliveryClose(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	fch.Cancel("", false) // broker-side stream close
+	if err := fch.Cancel("", false); err != nil { // broker-side stream close
+		t.Fatal(err)
+	}
 	select {
 	case <-c.Done():
 	case <-time.After(2 * time.Second):
