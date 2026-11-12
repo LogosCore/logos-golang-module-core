@@ -17,7 +17,7 @@ go vet ./...
 golangci-lint run ./...
 ```
 
-No Makefile; standard Go tooling. Go 1.25.7. CI (`.github/workflows/ci.yml`, the same file in protocol, module-core, channel-core, factory-core and the HTTP channel) runs `go test ./...` and golangci-lint v2.13.2 with its default linters (no config file) on pushes to `main`, on `v*` tags and on pull requests. The code is kept at 0 issues: fix a finding (an explicit `_ =` with the reason, for a Close whose error says nothing) rather than excluding it.
+No Makefile; standard Go tooling. Go 1.25.7. CI (`.github/workflows/ci.yml`, the same file in module-core, channel-core, factory-core and the HTTP, TCP and SSH modules; the protocol's adds 32-bit builds) runs `go test ./...` and golangci-lint v2.13.2 with its default linters (no config file) on pushes to `main`, on `v*` tags and on pull requests. The code is kept at 0 issues: fix a finding (an explicit `_ =` with the reason, for a Close whose error says nothing) rather than excluding it.
 
 ## Packages
 

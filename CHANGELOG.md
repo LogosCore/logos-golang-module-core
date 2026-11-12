@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.3.2
+
+- Requires `logos-golang-protocol` v0.50.0 (the minion config). No change of
+  its own.
+
+## v0.3.1
+
+- Requires `logos-golang-protocol` v0.49.0. No change of its own.
+
 ## v0.3.0
 
 - **`pkg/coretls`**: how a module trusts core's TLS certificate, from `LOGOS_CORE_CA_FILE` (a PEM trusted beside the system's), `LOGOS_CORE_CERT_SHA256` (exactly that certificate) or `LOGOS_CORE_TLS_INSECURE` (none verified, logged as a warning); `Client()` builds the process's client once. channel-core and factory-core use it for every request to core a module makes without a client of its own.
