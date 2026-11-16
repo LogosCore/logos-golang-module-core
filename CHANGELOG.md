@@ -1,9 +1,14 @@
 # Changelog
 
-## v0.3.3
+## v0.3.4
 
 - Requires `logos-golang-protocol` v0.55.0 (per-build exit codes, platform
   fields, the live build log, the desktop fronts). No change of its own.
+
+## v0.3.3
+
+- No change from v0.3.2: it was meant to take `logos-golang-protocol`
+  v0.55.0 and kept v0.50.0 (v0.3.4 takes it).
 
 ## v0.3.2
 
