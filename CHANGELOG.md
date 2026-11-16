@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.3.3
+
+- Requires `logos-golang-protocol` v0.55.0 (per-build exit codes, platform
+  fields, the live build log, the desktop fronts). No change of its own.
+
 ## v0.3.2
 
 - Requires `logos-golang-protocol` v0.50.0 (the minion config). No change of
