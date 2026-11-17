@@ -27,6 +27,11 @@ import (
 const (
 	minBackoff = time.Second
 	maxBackoff = 30 * time.Second
+	// noRouteBackoff paces sessions while the broker has no queue for core's
+	// RPC: core is starting on it (a broker that came back without its state
+	// has the queue once core declares it), so the instance registers within
+	// seconds of core rather than up to maxBackoff after.
+	noRouteBackoff = 5 * time.Second
 )
 
 // RPCQueue is the conventional rpc_queue of a moduleType instance: the queue
@@ -70,10 +75,16 @@ type Config struct {
 // Run keeps the instance registered until ctx is cancelled, then deregisters
 // and returns nil. It returns an error only for an invalid Config.
 //
-// lifecycle.Client gives up on a failed initial register and does not recover
-// a dropped broker connection, so Run supervises it: every failure reconnects
-// with exponential backoff (1s doubling to 30s, reset after a session that
-// stayed up longer than that).
+// lifecycle.Client gives up on a failed initial register, on as many
+// heartbeats in a row with no answer as core's grace misses, and does not
+// recover a dropped broker connection or control-plane channel, so Run
+// supervises it: every failure reconnects with exponential backoff (1s
+// doubling to 30s, reset after a session that stayed up longer than that;
+// every 5s while the broker has no queue for core's RPC).
+// Every call to core has a deadline, so a session never waits on core for
+// good: core down for a while, or a broker recreated without its state (core's
+// queue missing until core is back), ends in a new session that registers
+// once core answers.
 //
 // Core rejects sync traffic from unregistered instances, so stop Run only
 // after the module has drained its in-flight requests: give it a context of
@@ -148,10 +159,14 @@ func Run(ctx context.Context, cfg Config) error {
 
 // retryAfter is how long to wait after a failed session, and what to log. A
 // blocked instance stays blocked until an operator lifts the block, so it asks
-// again only every maxBackoff.
+// again only every maxBackoff; a broker with no queue for core's RPC has core
+// starting on it, so it asks again every noRouteBackoff.
 func retryAfter(err error, backoff time.Duration) (time.Duration, string) {
-	if coreerrors.Code(err) == protocol.CodeInstanceBlocked {
+	switch {
+	case coreerrors.Code(err) == protocol.CodeInstanceBlocked:
 		return maxBackoff, "control plane: core has blocked this instance; asking again later"
+	case errors.Is(err, lifecycle.ErrNoRoute):
+		return noRouteBackoff, "control plane: core has not started on the broker yet; registering again soon"
 	}
 	return backoff, "control plane: session failed; retrying"
 }
@@ -219,6 +234,11 @@ func runSession(ctx context.Context, cfg Config, router *mgmt.Router, logger fun
 		case <-rpcDone: // nil without a consumer: never ready
 			connLost <- fmt.Errorf("rpc_queue consumer on %q stopped", id.RPCQueue)
 			cancel()
+		case <-pub.Done():
+			// Its channel closed while the connection stayed up (a channel
+			// error): every call would fail from now on.
+			connLost <- fmt.Errorf("control-plane channel closed: %w", pub.Err())
+			cancel()
 		case <-sessionCtx.Done():
 		}
 	}()
@@ -257,7 +277,10 @@ func (p loggingPublisher) Call(ctx context.Context, req protocol.Envelope) (prot
 	reply, err := p.pub.Call(ctx, req)
 	switch {
 	case err != nil:
-		if ctx.Err() == nil && !p.connClosed() {
+		// A call cut short by the session ending says nothing; one core did
+		// not answer in time (its deadline passed) or that came back with
+		// no route does.
+		if !errors.Is(err, context.Canceled) && !p.connClosed() {
 			p.logger().Warn("control plane: call failed", "op", req.Type, "err", err)
 		}
 	case reply.Status == protocol.StatusError:

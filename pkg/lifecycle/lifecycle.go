@@ -14,6 +14,7 @@ package lifecycle
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -127,8 +128,10 @@ type HeartbeatResult struct {
 
 // Publisher transmits a control-plane RPC request envelope to core and returns
 // the reply. Implementations own AMQP transport; the Client owns envelope
-// construction and payload semantics. The Client serializes its calls, so a
-// Publisher need not be safe for concurrent use.
+// construction and payload semantics. Call must return once ctx ends: the
+// Client gives every call a deadline, and a call core never answers must not
+// outlive it. The Client serializes its own calls; a CoreClient sharing the
+// Publisher calls concurrently with it (AMQPPublisher is safe for that).
 type Publisher interface {
 	Call(ctx context.Context, req protocol.Envelope) (protocol.ReplyEnvelope, error)
 }
@@ -150,6 +153,7 @@ type Client struct {
 	extensionKeys []string
 
 	deregisterTimeout time.Duration
+	callTimeout       time.Duration
 	logger            *slog.Logger
 	// newTicker is injectable so the Run loop is deterministically testable.
 	newTicker func(time.Duration) (<-chan time.Time, func())
@@ -230,6 +234,17 @@ func WithDeregisterTimeout(d time.Duration) Option {
 	}
 }
 
+// WithCallTimeout bounds how long each register, heartbeat and deregister
+// waits for core's reply before it counts as lost (default
+// DefaultCallTimeout).
+func WithCallTimeout(d time.Duration) Option {
+	return func(c *Client) {
+		if d > 0 {
+			c.callTimeout = d
+		}
+	}
+}
+
 // NewClient builds a lifecycle Client for id, transmitting over pub.
 func NewClient(pub Publisher, id Identity, opts ...Option) *Client {
 	c := &Client{
@@ -238,6 +253,7 @@ func NewClient(pub Publisher, id Identity, opts ...Option) *Client {
 		source:            protocol.Source{Service: id.ModuleType, Instance: id.Instance},
 		status:            func() Status { return StatusHealthy },
 		deregisterTimeout: defaultDeregisterTimeout,
+		callTimeout:       DefaultCallTimeout,
 		newTicker: func(d time.Duration) (<-chan time.Time, func()) {
 			t := time.NewTicker(d)
 			return t.C, t.Stop
@@ -423,6 +439,15 @@ func (c *Client) Deregister(ctx context.Context, reason string) error {
 // the management config from the ack (WithManagement) and adopts a changed
 // heartbeat interval. Run returns the error that ended it; a clean shutdown
 // via ctx cancellation returns nil.
+//
+// Every call has a deadline (WithCallTimeout; a heartbeat's is at most the
+// interval), so a request core never answers fails instead of holding the
+// loop: core down, or its queue missing from a broker that came back without
+// its state, where the request is dropped. A failed register ends Run, and so
+// do as many heartbeats in a row with no answer as core's grace misses: by
+// then core counts the instance dead, and the next session (module.Run)
+// registers it again. A heartbeat core answered, even with an error, is no
+// miss.
 func (c *Client) Run(ctx context.Context) error {
 	boot, err := c.Register(ctx)
 	if err != nil {
@@ -430,7 +455,7 @@ func (c *Client) Run(ctx context.Context) error {
 	}
 	c.reportApplied(ctx, boot)
 
-	interval := boot.HeartbeatInterval
+	interval, grace := boot.HeartbeatInterval, boot.GraceMisses
 	tick, stop := c.newTicker(interval)
 	defer func() { stop() }()
 	reregister := func() {
@@ -448,6 +473,7 @@ func (c *Client) Run(ctx context.Context) error {
 			return
 		}
 		c.reportApplied(ctx, boot)
+		grace = boot.GraceMisses
 		if boot.HeartbeatInterval == interval {
 			return
 		}
@@ -456,27 +482,46 @@ func (c *Client) Run(ctx context.Context) error {
 		tick, stop = c.newTicker(interval)
 	}
 
+	misses := 0
 	for {
 		select {
 		case <-ctx.Done():
 			c.gracefulDeregister()
 			return nil
 		case <-tick:
-			hb, err := c.Heartbeat(ctx)
-			if err != nil {
-				// On an unknown instance, re-register and resume. Other errors
-				// (transient transport, etc.) are retried on the next beat;
-				// core declares an instance dead only after grace misses.
-				if coreerrors.Code(err) == protocol.CodeUnknownInstance {
+			hctx, cancel := context.WithTimeout(ctx, interval)
+			hb, err := c.Heartbeat(hctx)
+			cancel()
+			switch {
+			case err == nil:
+				misses = 0
+				if hb.ConfigChanged {
 					reregister()
 				}
-				continue
-			}
-			if hb.ConfigChanged {
+			case ctx.Err() != nil:
+				// Shutting down: the next select deregisters.
+			case coreerrors.Code(err) == protocol.CodeUnknownInstance:
+				// Core no longer knows the instance (it counted it dead):
+				// register again and resume.
+				misses = 0
 				reregister()
+			case answered(err):
+				misses = 0 // core is there; it refused this beat
+			default:
+				misses++
+				if misses >= grace {
+					return fmt.Errorf("no answer from core to %d heartbeats in a row: %w", misses, err)
+				}
 			}
 		}
 	}
+}
+
+// answered reports whether err is core's error reply, rather than a call that
+// got none (no reply in time, no route, a closed channel).
+func answered(err error) bool {
+	var reply *coreerrors.Error
+	return errors.As(err, &reply)
 }
 
 // reportApplied heartbeats right after a register whose reply carried config,
@@ -507,6 +552,8 @@ func (c *Client) call(ctx context.Context, typ string, payload, out any) error {
 	if err != nil {
 		return coreerrors.Wrap(coreerrors.CodeInternal, "marshal "+typ+" request", err)
 	}
+	ctx, cancel := context.WithTimeout(ctx, c.callTimeout)
+	defer cancel()
 	reply, err := c.pub.Call(ctx, env)
 	if err != nil {
 		return err

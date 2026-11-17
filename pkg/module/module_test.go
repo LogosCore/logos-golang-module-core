@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
@@ -104,5 +105,44 @@ func TestRetryAfter(t *testing.T) {
 	}
 	if wait, msg := retryAfter(errors.New("connection refused"), 4*time.Second); wait != 4*time.Second || strings.Contains(msg, "blocked") {
 		t.Errorf("other error: %s %q", wait, msg)
+	}
+	// Core starting on a broker that came back without its state: soon,
+	// whatever the backoff had grown to.
+	noRoute := fmt.Errorf("no answer from core to 3 heartbeats in a row: %w", fmt.Errorf("%w (312 NO_ROUTE)", lifecycle.ErrNoRoute))
+	if wait, msg := retryAfter(noRoute, maxBackoff); wait != noRouteBackoff || !strings.Contains(msg, "not started") {
+		t.Errorf("no route: %s %q, want %s", wait, msg, noRouteBackoff)
+	}
+}
+
+type errPublisher struct{ err error }
+
+func (p errPublisher) Call(context.Context, protocol.Envelope) (protocol.ReplyEnvelope, error) {
+	return protocol.ReplyEnvelope{}, p.err
+}
+
+// A call core did not answer in time, or that came back with no route, is
+// logged: before, a timeout read as the session ending and went unlogged. A
+// call cut short by the session ending, or on a connection already gone, is
+// not.
+func TestLoggingPublisherLogsLostCalls(t *testing.T) {
+	cases := []struct {
+		err        error
+		connClosed bool
+		logged     bool
+	}{
+		{fmt.Errorf("no reply from core: %w", context.DeadlineExceeded), false, true},
+		{fmt.Errorf("%w (312 NO_ROUTE)", lifecycle.ErrNoRoute), false, true},
+		{fmt.Errorf("no reply from core: %w", context.Canceled), false, false},
+		{lifecycle.ErrPublisherClosed, true, false},
+	}
+	for _, tc := range cases {
+		var buf strings.Builder
+		p := loggingPublisher{pub: errPublisher{tc.err}, instance: "http-1",
+			connClosed: func() bool { return tc.connClosed },
+			logger:     func() *slog.Logger { return slog.New(slog.NewTextHandler(&buf, nil)) }}
+		_, _ = p.Call(context.Background(), protocol.Envelope{Type: lifecycle.TypeHeartbeat})
+		if got := strings.Contains(buf.String(), "control plane: call failed"); got != tc.logged {
+			t.Errorf("%v (conn closed %v): logged %v, want %v", tc.err, tc.connClosed, got, tc.logged)
+		}
 	}
 }

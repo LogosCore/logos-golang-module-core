@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -29,17 +31,24 @@ func testIdentity() Identity {
 }
 
 // fakePublisher records sent envelopes and replies via a scripted function.
+// Requests silent picks get no reply: Call waits out their context, as
+// AMQPPublisher does for a request core never answers.
 type fakePublisher struct {
 	mu      sync.Mutex
 	sent    []protocol.Envelope
 	replyFn func(req protocol.Envelope) (protocol.ReplyEnvelope, error)
+	silent  func(req protocol.Envelope) bool
 }
 
-func (f *fakePublisher) Call(_ context.Context, req protocol.Envelope) (protocol.ReplyEnvelope, error) {
+func (f *fakePublisher) Call(ctx context.Context, req protocol.Envelope) (protocol.ReplyEnvelope, error) {
 	f.mu.Lock()
 	f.sent = append(f.sent, req)
-	fn := f.replyFn
+	fn, silent := f.replyFn, f.silent
 	f.mu.Unlock()
+	if silent != nil && silent(req) {
+		<-ctx.Done()
+		return protocol.ReplyEnvelope{}, fmt.Errorf("no reply from core: %w", ctx.Err())
+	}
 	return fn(req)
 }
 
@@ -304,56 +313,82 @@ func TestRunReregistersOnUnknownInstance(t *testing.T) {
 	<-done
 }
 
-// fakeAMQPChannel captures published messages for AMQPPublisher transport tests.
+// fakeAMQPChannel captures published messages for AMQPPublisher transport
+// tests; onPublish, when set, plays core's side (a reply, a return) once a
+// request is out, as on the wire nothing can come back before it.
 type fakeAMQPChannel struct {
 	mu        sync.Mutex
 	published []amqp.Publishing
+	mandatory []bool
 	pubErr    error
+	onPublish func(amqp.Publishing)
 }
 
-func (f *fakeAMQPChannel) PublishWithContext(_ context.Context, _, _ string, _, _ bool, msg amqp.Publishing) error {
+func (f *fakeAMQPChannel) PublishWithContext(_ context.Context, _, _ string, mandatory, _ bool, msg amqp.Publishing) error {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	if f.pubErr != nil {
+		f.mu.Unlock()
 		return f.pubErr
 	}
 	f.published = append(f.published, msg)
+	f.mandatory = append(f.mandatory, mandatory)
+	on := f.onPublish
+	f.mu.Unlock()
+	if on != nil {
+		on(msg)
+	}
 	return nil
 }
 
 func (f *fakeAMQPChannel) Close() error { return nil }
 
-func (f *fakeAMQPChannel) last() amqp.Publishing {
+func (f *fakeAMQPChannel) last() (amqp.Publishing, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.published[len(f.published)-1]
+	return f.published[len(f.published)-1], f.mandatory[len(f.mandatory)-1]
 }
 
-func TestAMQPPublisherMatchesCorrelationAndSkipsStale(t *testing.T) {
-	replies := make(chan amqp.Delivery, 2)
-	fch := &fakeAMQPChannel{}
-	p := &AMQPPublisher{ch: fch, replies: replies}
+func (f *fakeAMQPChannel) count() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.published)
+}
 
-	req := protocol.Envelope{
-		MessageID:     "req-1",
-		CorrelationID: "req-1",
+func replyBody(t *testing.T, req protocol.Envelope) []byte {
+	t.Helper()
+	rep, err := protocol.NewReply(req, protocol.Source{Service: "core", Instance: "core-1"},
+		registerReply{Instance: "http-1", Registered: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := json.Marshal(rep)
+	return b
+}
+
+func testRequest(id string) protocol.Envelope {
+	return protocol.Envelope{
+		MessageID:     id,
+		CorrelationID: id,
 		Type:          TypeRegister,
 		Version:       protocol.EnvelopeVersionV1,
 		Source:        protocol.Source{Service: "channel", Instance: "http-1"},
 		Payload:       json.RawMessage(`{}`),
 	}
-	want, err := protocol.NewReply(req, protocol.Source{Service: "core", Instance: "core-1"},
-		registerReply{Instance: "http-1", Registered: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	wantBody, _ := json.Marshal(want)
+}
 
-	// A stale reply for a different correlation id, then the real one.
-	replies <- amqp.Delivery{CorrelationId: "other", Body: []byte(`{"status":"ok"}`)}
-	replies <- amqp.Delivery{CorrelationId: "req-1", Body: wantBody}
+func TestAMQPPublisherMatchesCorrelationAndSkipsStale(t *testing.T) {
+	replies := make(chan amqp.Delivery, 2)
+	req := testRequest("req-1")
+	fch := &fakeAMQPChannel{onPublish: func(amqp.Publishing) {
+		// A stale reply for a different correlation id, then the real one.
+		replies <- amqp.Delivery{CorrelationId: "other", Body: []byte(`{"status":"ok"}`)}
+		replies <- amqp.Delivery{CorrelationId: "req-1", Body: replyBody(t, req)}
+	}}
+	p := newPublisher(fch, replies, nil)
 
-	got, err := p.Call(context.Background(), req)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	got, err := p.Call(ctx, req)
 	if err != nil {
 		t.Fatalf("Call: %v", err)
 	}
@@ -361,38 +396,171 @@ func TestAMQPPublisherMatchesCorrelationAndSkipsStale(t *testing.T) {
 		t.Errorf("reply = %+v, want correlation req-1 status ok", got)
 	}
 
-	pub := fch.last()
+	pub, mandatory := fch.last()
 	if pub.ReplyTo != directReplyTo {
 		t.Errorf("reply_to = %q, want %q", pub.ReplyTo, directReplyTo)
 	}
 	if pub.CorrelationId != "req-1" || pub.Type != TypeRegister {
 		t.Errorf("publishing props = {corr:%q type:%q}", pub.CorrelationId, pub.Type)
 	}
+	// Mandatory, so a request no queue takes comes back; and it expires
+	// with the call, so core never acts on one its caller gave up on.
+	if !mandatory {
+		t.Error("request not published as mandatory")
+	}
+	if ms, err := strconv.Atoi(pub.Expiration); err != nil || ms < 1 || ms > 5000 {
+		t.Errorf("expiration = %q, want the call's 5s deadline in ms", pub.Expiration)
+	}
 }
 
 func TestAMQPPublisherHonorsContextCancel(t *testing.T) {
-	p := &AMQPPublisher{ch: &fakeAMQPChannel{}, replies: make(chan amqp.Delivery)}
+	p := newPublisher(&fakeAMQPChannel{}, make(chan amqp.Delivery), nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	_, err := p.Call(ctx, protocol.Envelope{CorrelationID: "x"})
-	if err == nil {
-		t.Fatal("expected context error, got nil")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Call = %v, want context.Canceled", err)
+	}
+}
+
+// A request core never answers (core down, its queue dropping nothing back)
+// ends at the call's deadline, which also bounds the request's life in a
+// queue.
+func TestAMQPPublisherTimesOutWithoutAReply(t *testing.T) {
+	fch := &fakeAMQPChannel{}
+	p := newPublisher(fch, make(chan amqp.Delivery), nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_, err := p.Call(ctx, testRequest("x"))
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Call = %v, want context.DeadlineExceeded", err)
+	}
+	if d := time.Since(start); d > 2*time.Second {
+		t.Fatalf("Call returned after %s", d)
+	}
+	if pub, _ := fch.last(); pub.Expiration == "" || pub.Expiration == "0" {
+		t.Errorf("expiration = %q, want the 50ms deadline", pub.Expiration)
 	}
 }
 
 func TestAMQPPublisherPublishError(t *testing.T) {
-	p := &AMQPPublisher{ch: &fakeAMQPChannel{pubErr: fmt.Errorf("broker down")}, replies: make(chan amqp.Delivery)}
+	p := newPublisher(&fakeAMQPChannel{pubErr: fmt.Errorf("broker down")}, make(chan amqp.Delivery), nil)
 	if _, err := p.Call(context.Background(), protocol.Envelope{CorrelationID: "x"}); err == nil {
 		t.Fatal("expected publish error, got nil")
 	}
 }
 
-func TestAMQPPublisherReplyChannelClosed(t *testing.T) {
+// A broker that came back without its state has no queue for core's RPC until
+// core declares it again: the request comes back at once instead of being
+// dropped while the call waits. Not a refusal: no coreerrors.Error, so
+// callers retry it as a lost call.
+func TestAMQPPublisherNoRoute(t *testing.T) {
+	returns := make(chan amqp.Return, 1)
+	fch := &fakeAMQPChannel{onPublish: func(m amqp.Publishing) {
+		returns <- amqp.Return{CorrelationId: m.CorrelationId, ReplyCode: 312, ReplyText: "NO_ROUTE"}
+	}}
+	p := newPublisher(fch, make(chan amqp.Delivery), returns)
+	done := make(chan error, 1)
+	go func() {
+		_, err := p.Call(context.Background(), testRequest("x"))
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrNoRoute) {
+			t.Fatalf("Call = %v, want ErrNoRoute", err)
+		}
+		var refusal *coreerrors.Error
+		if errors.As(err, &refusal) {
+			t.Fatalf("ErrNoRoute reads as core's refusal: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("a returned request left its call waiting")
+	}
+}
+
+// Calls share the publisher (the lifecycle loop, a factory's CoreClient): one
+// core does not answer must not hold up another, and replies reach their
+// calls in whatever order they come.
+func TestAMQPPublisherCallsDoNotWaitForEachOther(t *testing.T) {
+	replies := make(chan amqp.Delivery, 4)
+	silentOut := make(chan struct{})
+	fch := &fakeAMQPChannel{}
+	fch.onPublish = func(m amqp.Publishing) {
+		switch m.CorrelationId {
+		case "silent":
+			close(silentOut)
+		case "answered":
+			replies <- amqp.Delivery{CorrelationId: "answered", Body: replyBody(t, testRequest("answered"))}
+		}
+	}
+	p := newPublisher(fch, replies, nil)
+
+	sctx, scancel := context.WithCancel(context.Background())
+	silentDone := make(chan error, 1)
+	go func() {
+		_, err := p.Call(sctx, testRequest("silent"))
+		silentDone <- err
+	}()
+	<-silentOut
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	got, err := p.Call(ctx, testRequest("answered"))
+	if err != nil {
+		t.Fatalf("a call behind one core does not answer: %v", err)
+	}
+	if got.CorrelationID != "answered" {
+		t.Errorf("reply = %+v, want the answered call's", got)
+	}
+	select {
+	case err := <-silentDone:
+		t.Fatalf("the silent call ended early: %v", err)
+	default:
+	}
+	scancel()
+	if err := <-silentDone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("silent call = %v, want context.Canceled", err)
+	}
+}
+
+// The channel closing (the session's end, or a channel error on a connection
+// still up) fails the calls waiting and every later one, and closes Done,
+// which module.Run watches to start a new session.
+func TestAMQPPublisherClosedChannelFailsCalls(t *testing.T) {
 	replies := make(chan amqp.Delivery)
+	out := make(chan struct{})
+	fch := &fakeAMQPChannel{onPublish: func(amqp.Publishing) { close(out) }}
+	p := newPublisher(fch, replies, nil)
+	done := make(chan error, 1)
+	go func() {
+		_, err := p.Call(context.Background(), testRequest("x"))
+		done <- err
+	}()
+	<-out
 	close(replies)
-	p := &AMQPPublisher{ch: &fakeAMQPChannel{}, replies: replies}
-	if _, err := p.Call(context.Background(), protocol.Envelope{CorrelationID: "x"}); err == nil {
-		t.Fatal("expected error when reply channel closed, got nil")
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrPublisherClosed) {
+			t.Fatalf("waiting call = %v, want ErrPublisherClosed", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("a closed channel left its call waiting")
+	}
+	select {
+	case <-p.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("Done not closed")
+	}
+	if !errors.Is(p.Err(), ErrPublisherClosed) {
+		t.Errorf("Err = %v", p.Err())
+	}
+	if _, err := p.Call(context.Background(), testRequest("y")); !errors.Is(err, ErrPublisherClosed) {
+		t.Fatalf("call after close = %v, want ErrPublisherClosed", err)
+	}
+	if n := fch.count(); n != 1 {
+		t.Errorf("published %d requests, want 1: none after the close", n)
 	}
 }
 
@@ -400,7 +568,7 @@ func TestAMQPPublisherCloseNilSafe(t *testing.T) {
 	if err := (&AMQPPublisher{}).Close(); err != nil {
 		t.Fatalf("Close on zero publisher: %v", err)
 	}
-	if err := (&AMQPPublisher{ch: &fakeAMQPChannel{}}).Close(); err != nil {
+	if err := newPublisher(&fakeAMQPChannel{}, make(chan amqp.Delivery), nil).Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 }
@@ -808,4 +976,207 @@ func (s *syncBuffer) String() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.b.String()
+}
+
+// A register core never answers (core down, or its queue missing from a
+// broker that came back without it, which drops the request) fails at the call
+// timeout: Run returns, and module.Run starts a new session. Before, Run
+// waited for that reply forever and the instance never registered again.
+func TestRunFailsARegisterCoreNeverAnswers(t *testing.T) {
+	fp := &fakePublisher{silent: func(protocol.Envelope) bool { return true }}
+	c := NewClient(fp, testIdentity(), WithCallTimeout(50*time.Millisecond))
+	done := make(chan error, 1)
+	go func() { done <- c.Run(context.Background()) }()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("Run = %v, want the register's deadline", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run still waiting for a register core never answers")
+	}
+}
+
+// liveClient registers c with a fake core that answers registers (grace
+// misses 2) and deregisters, runs it with a hand-driven ticker, and returns
+// the ticker, a cancel and Run's result.
+func liveClient(t *testing.T, fp *fakePublisher, heartbeat func(protocol.Envelope) (protocol.ReplyEnvelope, error),
+	opts ...Option) (chan time.Time, context.CancelFunc, chan error) {
+	t.Helper()
+	fp.replyFn = func(req protocol.Envelope) (protocol.ReplyEnvelope, error) {
+		switch req.Type {
+		case TypeRegister:
+			return okReply(t, req, registerReply{Instance: "http-1", Registered: true,
+				HeartbeatIntervalSecs: 1, HeartbeatGraceMisses: 2}), nil
+		case TypeHeartbeat:
+			return heartbeat(req)
+		case TypeDeregister:
+			return okReply(t, req, map[string]any{"deregistered": true}), nil
+		}
+		return protocol.ReplyEnvelope{}, fmt.Errorf("unexpected %q", req.Type)
+	}
+	c := NewClient(fp, testIdentity(), opts...)
+	tickCh := make(chan time.Time)
+	c.newTicker = func(time.Duration) (<-chan time.Time, func()) { return tickCh, func() {} }
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	done := make(chan error, 1)
+	go func() { done <- c.Run(ctx) }()
+	return tickCh, cancel, done
+}
+
+// As many heartbeats in a row with no answer as core's grace misses end Run
+// with an error (no deregister: the session is broken, not shutting down), so
+// the next session registers again once core is back.
+func TestRunEndsAfterGraceMissedHeartbeats(t *testing.T) {
+	fp := &fakePublisher{silent: func(req protocol.Envelope) bool { return req.Type == TypeHeartbeat }}
+	tick, _, done := liveClient(t, fp, nil, WithCallTimeout(20*time.Millisecond))
+
+	tick <- time.Time{} // first miss: still running
+	select {
+	case err := <-done:
+		t.Fatalf("Run ended after one missed heartbeat: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	tick <- time.Time{} // second, the grace: the session ends
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "2 heartbeats in a row") || !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("Run = %v, want no answer to 2 heartbeats", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run kept a session whose heartbeats core never answers")
+	}
+	if fp.hasType(TypeDeregister) {
+		t.Error("deregistered on a broken session")
+	}
+}
+
+// Only heartbeats with no answer count, and only in a row: one answered, even
+// with an error reply (core is there), starts the count again.
+func TestRunCountsOnlyUnansweredHeartbeatsInARow(t *testing.T) {
+	var mu sync.Mutex
+	script := []string{"silent", "ok", "silent", "refused", "silent", "ok"}
+	next := func() string {
+		mu.Lock()
+		defer mu.Unlock()
+		s := script[0]
+		script = script[1:]
+		return s
+	}
+	var cur string
+	fp := &fakePublisher{}
+	fp.silent = func(req protocol.Envelope) bool {
+		if req.Type != TypeHeartbeat {
+			return false
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		return cur == "silent"
+	}
+	answered := make(chan struct{}, len(script))
+	tick, cancel, done := liveClient(t, fp, func(req protocol.Envelope) (protocol.ReplyEnvelope, error) {
+		defer func() { answered <- struct{}{} }()
+		mu.Lock()
+		kind := cur
+		mu.Unlock()
+		if kind == "refused" {
+			return protocol.NewErrorReply(req, protocol.Source{Service: "core", Instance: "core-1"},
+				protocol.CodeInternalError, "store down"), nil
+		}
+		return okReply(t, req, heartbeatReply{Instance: "http-1", Ack: true}), nil
+	}, WithCallTimeout(20*time.Millisecond))
+
+	for range len(script) {
+		kind := next()
+		mu.Lock()
+		cur = kind
+		mu.Unlock()
+		tick <- time.Time{}
+		if kind == "silent" {
+			time.Sleep(60 * time.Millisecond) // past the call timeout
+		} else {
+			<-answered
+		}
+		select {
+		case err := <-done:
+			t.Fatalf("Run ended after %q: %v", kind, err)
+		default:
+		}
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("Run = %v, want nil on shutdown", err)
+	}
+	if !fp.hasType(TypeDeregister) {
+		t.Error("no deregister on shutdown")
+	}
+}
+
+// Shutting down while a heartbeat waits is a clean shutdown, not a miss: Run
+// deregisters and returns nil even with a grace of one.
+func TestRunShutdownDuringAWaitingHeartbeat(t *testing.T) {
+	waiting := make(chan struct{}, 1)
+	fp := &fakePublisher{silent: func(req protocol.Envelope) bool {
+		if req.Type != TypeHeartbeat {
+			return false
+		}
+		waiting <- struct{}{}
+		return true
+	}}
+	fp.replyFn = func(req protocol.Envelope) (protocol.ReplyEnvelope, error) {
+		switch req.Type {
+		case TypeRegister:
+			return okReply(t, req, registerReply{Instance: "http-1", Registered: true,
+				HeartbeatIntervalSecs: 60, HeartbeatGraceMisses: 1}), nil
+		case TypeDeregister:
+			return okReply(t, req, map[string]any{"deregistered": true}), nil
+		}
+		return protocol.ReplyEnvelope{}, fmt.Errorf("unexpected %q", req.Type)
+	}
+	c := NewClient(fp, testIdentity())
+	tickCh := make(chan time.Time)
+	c.newTicker = func(time.Duration) (<-chan time.Time, func()) { return tickCh, func() {} }
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- c.Run(ctx) }()
+	tickCh <- time.Time{}
+	<-waiting
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run = %v, want nil", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return")
+	}
+	if !fp.hasType(TypeDeregister) {
+		t.Error("no deregister on shutdown")
+	}
+}
+
+// A heartbeat waits at most its interval, even under a longer call timeout:
+// beats never pile up behind one core does not answer.
+func TestRunHeartbeatWaitsAtMostTheInterval(t *testing.T) {
+	fp := &fakePublisher{silent: func(req protocol.Envelope) bool { return req.Type == TypeHeartbeat }}
+	fp.replyFn = func(req protocol.Envelope) (protocol.ReplyEnvelope, error) {
+		return okReply(t, req, registerReply{Instance: "http-1", Registered: true, HeartbeatIntervalSecs: 1}), nil
+	}
+	c := NewClient(fp, testIdentity(), WithCallTimeout(time.Hour))
+	tickCh := make(chan time.Time)
+	c.newTicker = func(time.Duration) (<-chan time.Time, func()) { return tickCh, func() {} }
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = c.Run(ctx) }()
+	start := time.Now()
+	tickCh <- time.Time{}
+	select {
+	case tickCh <- time.Time{}: // taken: the first beat ended
+		if d := time.Since(start); d < 900*time.Millisecond || d > 3*time.Second {
+			t.Fatalf("first heartbeat ended after %s, want about the 1s interval", d)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a heartbeat outlived its interval")
+	}
 }

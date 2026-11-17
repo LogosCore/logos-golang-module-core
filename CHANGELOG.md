@@ -1,5 +1,35 @@
 # Changelog
 
+## v0.3.5
+
+- **A module registers again after core or its RabbitMQ was away.** A
+  lifecycle call had no deadline: a register or heartbeat published while no
+  queue took it (a RabbitMQ container recreated, as `docker compose down/up`
+  does, starts as a new node without core's queue until core declares it) was
+  dropped, and the module waited for its reply for good. Its session looked
+  healthy, so it never heartbeated or registered again and core kept it dead.
+  Now:
+  - every register, heartbeat and deregister has a deadline (`WithCallTimeout`,
+    default `DefaultCallTimeout`, 10s; a heartbeat's is at most its interval);
+  - requests are published *mandatory* with an `expiration` of the call's
+    deadline: one no queue takes comes back at once as `ErrNoRoute` (not a
+    `coreerrors.Error`: callers retry it as a lost call), and core never
+    handles one after its caller gave up (core's requests to modules already
+    did both);
+  - `lifecycle.Client.Run` ends when core leaves `heartbeat_grace_misses`
+    heartbeats in a row unanswered (an error reply is an answer), so
+    `module.Run` connects again and registers;
+  - while the broker has no queue for core's RPC, `module.Run` tries again
+    every 5s instead of backing off to 30s: core is starting on it, and the
+    instance registers within seconds of it;
+  - `AMQPPublisher` hands each reply to its call by correlation id: calls
+    run concurrently (the lifecycle loop and a factory's `CoreClient` no longer
+    wait behind each other), a closed channel fails them with
+    `ErrPublisherClosed`, and `Done`/`Err` end the session (`module.Run`
+    watches it) instead of every call failing on a channel that is gone;
+  - a call with no reply in time is logged (`control plane: call failed`);
+    before, a timeout read as the session ending and went unlogged.
+
 ## v0.3.4
 
 - Requires `logos-golang-protocol` v0.55.0 (per-build exit codes, platform
