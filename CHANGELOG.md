@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.3.6
+
+- Requires `logos-golang-protocol` v0.57.0 (the screenshot result, a
+  check-in interval of 0). No change of its own.
+
 ## v0.3.5
 
 - **A module registers again after core or its RabbitMQ was away.** A
